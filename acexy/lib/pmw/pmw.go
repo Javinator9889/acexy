@@ -142,3 +142,22 @@ func (pmw *PMultiWriter) Remove(w io.Writer) {
 	}
 	pmw.writers = writers
 }
+
+// Closes all the writers in the list.
+func (pmw *PMultiWriter) Close() error {
+	pmw.Lock()
+	defer pmw.Unlock()
+
+	var errors []error
+	for _, w := range pmw.writers {
+		if c, ok := w.(io.Closer); ok {
+			if err := c.Close(); err != nil {
+				errors = append(errors, err)
+			}
+		}
+	}
+	if len(errors) > 0 {
+		return PMultiWriterError{Errors: errors, Writers: len(pmw.writers)}
+	}
+	return nil
+}

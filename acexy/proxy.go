@@ -14,6 +14,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/dustin/go-humanize"
 )
 
 var (
@@ -23,6 +25,8 @@ var (
 	port          int
 	streamTimeout time.Duration
 	m3u8          bool
+	emptyTimeout  time.Duration
+	size          Size
 )
 
 //go:embed LICENSE.short
@@ -33,6 +37,11 @@ const APIv1_URL = "/ace"
 
 type Proxy struct {
 	Acexy *acexy.Acexy
+}
+
+type Size struct {
+	Bytes   uint64
+	Default uint64
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -104,8 +113,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// And wait for the client to disconnect
-	<-r.Context().Done()
-	slog.Debug("Client disconnected", "path", r.URL.Path)
+	select {
+	case <-r.Context().Done():
+		slog.Debug("Client disconnected", "path", r.URL.Path)
+	case <-p.Acexy.WaitStream(stream):
+		slog.Debug("Stream finished", "path", r.URL.Path)
+	}
 }
 
 func LookupEnvOrString(key string, def string) string {
@@ -164,6 +177,31 @@ func LookupLogLevel() slog.Level {
 	return slog.LevelInfo
 }
 
+func LookupEnvOrSize(key string, def uint64) *Size {
+	if val, ok := os.LookupEnv(key); ok {
+		if err := size.Set(val); err != nil {
+			slog.Error("Failed to parse environment variable", "key", key, "value", val)
+			return nil
+		}
+	} else {
+		size.Bytes = def
+	}
+	return &size
+}
+
+func (s *Size) Set(value string) error {
+	size, err := humanize.ParseBytes(value)
+	if err != nil {
+		return err
+	}
+	s.Bytes = uint64(size)
+	return nil
+}
+
+func (s *Size) String() string { return humanize.Bytes(s.Bytes) }
+
+func (s *Size) Get() any { return s.Bytes }
+
 func parseArgs() {
 	// Parse the command-line arguments
 	flag.BoolFunc("license", "print the license and exit", func(_ string) error {
@@ -207,6 +245,17 @@ func parseArgs() {
 		LookupEnvOrBool("ACEXY_M3U8", false),
 		"enable M3U8 mode. Can be set with ACEXY_M3U8 environment variable.",
 	)
+	flag.DurationVar(
+		&emptyTimeout,
+		"empty-timeout",
+		LookupEnvOrDuration("ACEXY_EMPTY_TIMEOUT", 1*time.Minute),
+		"timeout in human-readable format to finish the stream when the source is empty. Can be set with ACEXY_EMPTY_TIMEOUT environment variable.",
+	)
+	flag.Var(
+		LookupEnvOrSize("ACEXY_BUFFER_SIZE", 4*1024*1024),
+		"buffer-size",
+		"buffer size in human-readable format to use when copying the data. Can be set with ACEXY_BUFFER_SIZE environment variable.",
+	)
 	flag.Parse()
 }
 
@@ -224,12 +273,15 @@ func main() {
 	}
 	// Create a new Acexy instance
 	acexy := &acexy.Acexy{
-		Scheme:   scheme,
-		Host:     host,
-		Port:     port,
-		Endpoint: endpoint,
+		Scheme:       scheme,
+		Host:         host,
+		Port:         port,
+		Endpoint:     endpoint,
+		EmptyTimeout: emptyTimeout,
+		BufferSize:   int(size.Bytes),
 	}
 	acexy.Init()
+	slog.Debug("Acexy", "acexy", acexy)
 
 	// Create a new HTTP server
 	proxy := &Proxy{Acexy: acexy}

@@ -60,15 +60,18 @@ type ongoingStream struct {
 	done    chan struct{}
 	player  *http.Response
 	stream  *AceStream
+	copier  *Copier
 	writers *pmw.PMultiWriter
 }
 
 // Structure referencing the AceStream Proxy - this is, ourselves
 type Acexy struct {
-	Scheme   string
-	Host     string
-	Port     int
-	Endpoint AcexyEndpoint
+	Scheme       string        // The scheme to be used when connecting to the AceStream middleware
+	Host         string        // The host to be used when connecting to the AceStream middleware
+	Port         int           // The port to be used when connecting to the AceStream middleware
+	Endpoint     AcexyEndpoint // The endpoint to be used when connecting to the AceStream middleware
+	EmptyTimeout time.Duration // Timeout after which, if no data is written, the stream is closed
+	BufferSize   int           // The buffer size to use when copying the data
 
 	// Information about ongoing streams
 	streams map[AceID]*ongoingStream
@@ -171,17 +174,26 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 		return err
 	}
 
+	// Forward the response to the writers
+	ongoingStream.copier = &Copier{
+		Destination:  ongoingStream.writers,
+		Source:       resp.Body,
+		EmptyTimeout: a.EmptyTimeout,
+		BufferSize:   a.BufferSize,
+	}
+
 	go func() {
 		defer close(ongoingStream.done)
 
-		// Copy the response body until EOF
-		if _, err := io.Copy(ongoingStream.writers, resp.Body); err != nil {
+		// Start copying the stream
+		if err := ongoingStream.copier.Copy(); err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				slog.Info("Client closed connection", "stream", stream.ID)
 			} else {
 				slog.Warn("Failed to copy response body", "error", err)
 			}
 		}
+		slog.Debug("Copy done", "stream", stream.ID)
 	}()
 
 	ongoingStream.player = resp
@@ -227,6 +239,22 @@ func (a *Acexy) StopStream(stream *AceStream, out io.Writer) error {
 		slog.Info("Stream done", "stream", stream.ID)
 	}
 	return nil
+}
+
+// Waits for the stream to finish. The stream is identified by the “id“ identifier. If the stream
+// is not enqueued, nil is returned. The function returns a channel that will be closed when the
+// stream finishes.
+func (a *Acexy) WaitStream(stream *AceStream) <-chan struct{} {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	// Get the ongoing stream
+	ongoingStream, ok := a.streams[stream.ID]
+	if !ok {
+		return nil
+	}
+
+	return ongoingStream.done
 }
 
 // Performs a request to the AceStream backend to start a new stream. It uses the Acexy

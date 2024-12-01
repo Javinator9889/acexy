@@ -11,3 +11,5 @@ services:
       ACEXY_PORT: "6878"          # Port is 6878
       ACEXY_M3U8_STREAM_TIMEOUT: "60s"  # Timeout is 60 seconds when in M3U8 mode
       ACEXY_M3U8: "false"         # Disable M3U8 mode
+      ACEXY_EMPTY_TIMEOUT: "60s"  # Timeout to close the connection if no data is received
+      ACEXY_BUFFER_SIZE: 4MB      # Buffer size is 4MB
