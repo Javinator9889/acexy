@@ -11,12 +11,17 @@ RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -o /acexy
 
 # Create a minimal image
-FROM martinbjeldbak/acestream-http-proxy:2.3 AS final-stage
+FROM ghcr.io/martinbjeldbak/acestream-http-proxy:latest AS final-stage
 
 COPY --link             bin/entrypoint /bin/entrypoint
 COPY --from=build-stage /acexy         /acexy
 EXPOSE 8080
-ENV EXTRA_FLAGS="--cache-dir /tmp --cache-limit 2 --cache-auto 1 --log-stderr --log-stderr-level error"
+
+# Obtener VPN_PORT desde el archivo portconfig
+RUN export VPN_PORT=$(grep -E '^VPN_PORT=' /mnt/portconfig | cut -d'=' -f2)
+
+
+ENV EXTRA_FLAGS="--cache-dir /tmp --cache-limit 2 --cache-auto 1 --log-stderr --log-stderr-level error --port $VPN_PORT"
 ENV ACEXY_LISTEN_ADDR=":8080"
 # USER acestream:acestream
 
