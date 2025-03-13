@@ -248,6 +248,7 @@ adjustable by using environment variables.
       <th><code>1s</code></th>
     <tr>
     <tr>
+      <th><code>gluetun</code></th>
       <th><code>GLUETUN</code></th>
       <th>
         Enable port forwarding via Gluetun container by setting it to <code>true</code>.
@@ -255,6 +256,7 @@ adjustable by using environment variables.
       <th><code>null</code></th>
     <tr>
     <tr>
+      <th><code>gluetun-dir</code></th>
       <th><code>GLUETUN_DIR</code></th>
       <th>
         IP Address of the Gluetun Container. Won't have any effect if the GLUETUN variable is not set to true.
