@@ -15,11 +15,11 @@ if [[ "$GLUETUN" == "true" ]]; then
         VPN_PORT=8621
         echo "WARNING: VPN_PORT not found. Using default: $VPN_PORT"
     fi
+    # Modify EXTRA_FLAGS with the VPN port
+    export EXTRA_FLAGS="$EXTRA_FLAGS --port $VPN_PORT"
+    echo "Starting with EXTRA_FLAGS: $EXTRA_FLAGS"
+fi
 
-
-# Modify EXTRA_FLAGS with the VPN port
-export EXTRA_FLAGS="$EXTRA_FLAGS --port $VPN_PORT"
-echo "Starting with EXTRA_FLAGS: $EXTRA_FLAGS"
 
 $SHELL /run.sh &
 
