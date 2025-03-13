@@ -5,6 +5,24 @@
 
 # Start the AceStream engine. As of https://github.com/martinbjeldbak/acestream-http-proxy/blob/b293a44c6260bd82f0b20038aa1cfa8cb9b7471f/Dockerfile#L40
 # the script is located at "/run.sh"
+
+# Extract port from Gluetun container if the GLUETUN env is set to true
+if [[ "$GLUETUN" == "true" ]]; then
+    VPN_PORT=$(curl -s "http://$GLUETUN_DIR:8000/v1/openvpn/portforwarded" | jq -r '.port')
+
+    # If the VPN port is not found, use the AceStream default port
+    if [[ -z "$VPN_PORT" || "$VPN_PORT" == "null" ]]; then
+        VPN_PORT=8621
+        echo "WARNING: VPN_PORT not found. Using default: $VPN_PORT"
+    fi
+else
+    VPN_PORT=8621
+fi
+
+# Modify EXTRA_FLAGS with the VPN port
+export EXTRA_FLAGS="$EXTRA_FLAGS --port $VPN_PORT"
+echo "Starting with EXTRA_FLAGS: $EXTRA_FLAGS"
+
 $SHELL /run.sh &
 
 # Start the proxy. Acexy is located at "/acexy"
