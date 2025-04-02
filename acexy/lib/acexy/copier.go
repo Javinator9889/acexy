@@ -2,8 +2,10 @@ package acexy
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"log/slog"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +31,8 @@ type Copier struct {
 func (c *Copier) Copy() error {
 	c.bufferedWriter = bufio.NewWriterSize(c.Destination, c.BufferSize)
 	c.timer = time.NewTimer(c.EmptyTimeout)
+	defer c.timer.Stop()
+
 	done := make(chan struct{})
 	defer close(done)
 
@@ -55,8 +59,35 @@ func (c *Copier) Copy() error {
 		}
 	}()
 
-	_, err := io.Copy(c, c.Source)
-	return err
+	// Copy data from source to destination with write error handling
+	buf := make([]byte, c.BufferSize)
+	for {
+		n, err := c.Source.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				return nil // Stream finished normally
+			}
+			slog.Error("Stream read error", "error", err)
+			return err
+		}
+
+		_, writeErr := c.bufferedWriter.Write(buf[:n])
+		if writeErr != nil {
+			// Detect client disconnection (broken pipe / reset connection)
+			if errors.Is(writeErr, syscall.EPIPE) || errors.Is(writeErr, syscall.ECONNRESET) {
+				slog.Debug("Client disconnected, stopping stream")
+				return nil
+			}
+			slog.Error("Write error", "error", writeErr)
+			return writeErr
+		}
+
+		// Ensure data is sent to the client immediately
+		if flushErr := c.bufferedWriter.Flush(); flushErr != nil {
+			slog.Error("Flush error", "error", flushErr)
+			return flushErr
+		}
+	}
 }
 
 // Write writes the data to the destination. It also resets the timer if there is data to write.
