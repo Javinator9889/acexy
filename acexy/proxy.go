@@ -98,14 +98,11 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Starting stream", "path", r.URL.Path, "id", aceId)
 	username := q.Get("user")
 
-
-
 	if err := p.Acexy.StartStream(stream, w, username); err != nil {
 		slog.Error("Failed to start stream", "stream", aceId, "error", err)
 		http.Error(w, "Failed to start stream: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
 
 	// Update the client headers
 	w.WriteHeader(http.StatusOK)

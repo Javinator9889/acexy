@@ -52,7 +52,7 @@ type AcexyStatus struct {
 	ID      *AceID `json:"stream_id,omitempty"`
 	StatURL string `json:"stat_url,omitempty"`
 	Users   []string `json:"users,omitempty"`
-	UsersByStream   map[string][]string `json:"users_by_stream,omitempty"`
+	UsersByStream  map[string][]string `json:"users_by_stream,omitempty"`
 }
 
 // The stream information is stored in a structure referencing the `AceStreamResponse`
@@ -71,7 +71,7 @@ type ongoingStream struct {
 	stream  *AceStream
 	copier  *Copier
 	writers *pmw.PMultiWriter
-	users   map[io.Writer]string
+	users   map[AceID]string
 }
 
 // Structure referencing the AceStream Proxy - this is, ourselves
@@ -155,7 +155,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		player:  nil,
 		stream:  stream,
 		writers: pmw.New(),
-		users:   make(map[io.Writer]string),
+		users: make(map[AceID]string),
 	}
 	slog.Info("Started new stream", "id", aceId, "clients", a.streams[aceId].clients)
 	return stream, nil
@@ -175,16 +175,11 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer, username string) e
 	// Add the writer to the list of writers
 	ongoingStream.writers.Add(out)
 
-
 	// Add the username
-	ongoingStream.users[out] = username
-
+	ongoingStream.users[stream.ID] = username
 
 	// Register the new client
 	ongoingStream.clients++
-
-
-
 
 	// Check if the stream is already being played
 	if ongoingStream.player != nil {
@@ -298,7 +293,7 @@ func (a *Acexy) StopStream(stream *AceStream, out io.Writer) error {
 	}
 
 	// Delete the user entry
-	delete(ongoingStream.users, out)
+	delete(ongoingStream.users, stream.ID)
 
 	// Check if we have to stop the stream
 	if ongoingStream.clients == 0 {
@@ -438,9 +433,9 @@ func (a *Acexy) GetStatus(id *AceID) (AcexyStatus, error) {
 	if id == nil {
 		streams := uint(len(a.streams))
 
-		// NEW: collect all users from all streams
+		// Collect all users from all streams
 		userSet := make(map[string]struct{})
-		usersByStream := make(map[string][]string)
+		usersByStream := make(map[AceID][]string)  // usar AceID como clave
 
 		for streamID, s := range a.streams {
 			if s == nil {
@@ -448,23 +443,28 @@ func (a *Acexy) GetStatus(id *AceID) (AcexyStatus, error) {
 				continue
 			}
 
-			idStr := streamID.String() // ✅ this is valid
 			for _, user := range s.users {
 				if user != "" {
 					userSet[user] = struct{}{}
-					usersByStream[idStr] = append(usersByStream[idStr], user)
+					usersByStream[streamID] = append(usersByStream[streamID], user)  // usar AceID directo
 				}
 			}
 		}
+
 		users := make([]string, 0, len(userSet))
 		for user := range userSet {
 			users = append(users, user)
+		}
+		//Convert to string because GO doesn't allow structs as map keys
+		usersByStreamJSON := make(map[string][]string, len(usersByStream))
+			for id, users := range usersByStream {
+				usersByStreamJSON[id.String()] = users
 		}
 
 		return AcexyStatus{
 			Streams: &streams,
 			Users:   users,
-			UsersByStream: usersByStream,
+			UsersByStream: usersByStreamJSON,
 		}, nil
 	}
 
@@ -472,7 +472,6 @@ func (a *Acexy) GetStatus(id *AceID) (AcexyStatus, error) {
 	if stream, ok := a.streams[*id]; ok {
 		users := make([]string, 0, len(stream.users))
 		for _, user := range stream.users {
-			//DEBUG
 			slog.Debug("Listing user", "user", user)
 			users = append(users, user)
 		}
