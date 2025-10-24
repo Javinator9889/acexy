@@ -342,7 +342,9 @@ func GetStream(a *Acexy, aceId AceID, extraParams url.Values) (*AceStreamMiddlew
 	req.URL.RawQuery = extraParams.Encode()
 
 	slog.Debug("Request URL", "url", req.URL.String())
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: a.NoResponseTimeout,
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		slog.Debug("Error getting stream", "error", err)
@@ -385,7 +387,12 @@ func CloseStream(stream *AceStream) error {
 	q.Add("method", "stop")
 	req.URL.RawQuery = q.Encode()
 
-	client := &http.Client{}
+	client := &http.Client{
+		/* the backend should respond in way less time than this one, but it may hang (AceStream)
+		 * is not very well coded), so we set a timeout to avoid hanging forever
+		 */
+		Timeout: 3 * time.Second,
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		return err

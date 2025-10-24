@@ -316,7 +316,7 @@ func parseArgs() {
 	flag.DurationVar(
 		&noResponseTimeout,
 		"no-response-timeout",
-		LookupEnvOrDuration("ACEXY_NO_RESPONSE_TIMEOUT", 1*time.Second),
+		LookupEnvOrDuration("ACEXY_NO_RESPONSE_TIMEOUT", 10*time.Second),
 		"timeout in human-readable format to wait for a response from the AceStream middleware. "+
 			"Can be set with ACEXY_NO_RESPONSE_TIMEOUT environment variable. "+
 			"Depending on the network conditions, you may want to adjust this value",
