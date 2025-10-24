@@ -264,6 +264,26 @@ adjustable by using environment variables.
       </th>
       <th><code>1s</code></th>
     <tr>
+    <tr>
+      <th><code>-server-read-timeout</code></th>
+      <th><code>ACEXY_SERVER_READ_TIMEOUT</code></th>
+      <th>
+        Time to wait for a client connected to the proxy to finish transmitting the request. This
+        must be set to an acceptable value to prevent dangling clients blocking the proxy with long
+        running requests.
+      </th>
+      <th><code>5s</code></th>
+    <tr>
+    <tr>
+      <th><code>-server-write-timeout</code></th>
+      <th><code>ACEXY_SERVER_WRITE_TIMEOUT</code></th>
+      <th>
+        Time to wait to transmit streaming chunks (this is, the video + audio) to a client connected
+        to the proxy. This must be set to an acceptable value to prevent the proxy from being blocked
+        by clients playing nasty with the server (ie: disconnected but with the connection still open).
+      </th>
+      <th><code>10s</code></th>
+    <tr>
   </tbody>
 </table>
 

@@ -20,15 +20,17 @@ import (
 )
 
 var (
-	addr              string
-	scheme            string
-	host              string
-	port              int
-	streamTimeout     time.Duration
-	m3u8              bool
-	emptyTimeout      time.Duration
-	size              Size
-	noResponseTimeout time.Duration
+	addr               string
+	scheme             string
+	host               string
+	port               int
+	streamTimeout      time.Duration
+	m3u8               bool
+	emptyTimeout       time.Duration
+	size               Size
+	noResponseTimeout  time.Duration
+	serverReadTimeout  time.Duration
+	serverWriteTimeout time.Duration
 )
 
 //go:embed LICENSE.short
@@ -321,6 +323,22 @@ func parseArgs() {
 			"Can be set with ACEXY_NO_RESPONSE_TIMEOUT environment variable. "+
 			"Depending on the network conditions, you may want to adjust this value",
 	)
+	flag.DurationVar(
+		&serverReadTimeout,
+		"server-read-timeout",
+		LookupEnvOrDuration("ACEXY_SERVER_READ_TIMEOUT", 5*time.Second),
+		"timeout in human-readable format to wait to finish reading a client connected to the "+
+			"proxy petition. Useful to prevent attacks or dangling clients blocking the proxy. "+
+			"Can be set with ACEXY_SERVER_READ_TIMEOUT environment variable.",
+	)
+	flag.DurationVar(
+		&serverWriteTimeout,
+		"server-write-timeout",
+		LookupEnvOrDuration("ACEXY_SERVER_WRITE_TIMEOUT", 10*time.Second),
+		"timeout in human-readable format to wait to finish writing streaming chunks to a client "+
+			"connected to the proxy. Useful to prevent attacks or dangling clients blocking the proxy. "+
+			"Can be set with ACEXY_SERVER_WRITE_TIMEOUT environment variable.",
+	)
 	flag.Parse()
 }
 
@@ -359,7 +377,13 @@ func main() {
 
 	// Start the HTTP server
 	slog.Info("Starting server", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  serverReadTimeout,
+		WriteTimeout: serverWriteTimeout,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("Failed to start server", "error", err)
 		os.Exit(1)
 	}

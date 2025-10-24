@@ -14,6 +14,8 @@ services:
       ACEXY_EMPTY_TIMEOUT: "60s"  # Timeout to close the connection if no data is received
       ACEXY_BUFFER_SIZE: 4MB      # Buffer size is 4MB
       ACEXY_NO_RESPONSE_TIMEOUT: "10s"  # Timeout to close the connection if no response is received
+      ACEXY_SERVER_READ_TIMEOUT: "5s"    # Timeout to finish reading from client
+      ACEXY_SERVER_WRITE_TIMEOUT: "10s"  # Timeout to finish writing to client
     links:
       - acestream
     depends_on:
