@@ -38,6 +38,8 @@ package pmw
 import (
 	"fmt"
 	"io"
+	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -49,6 +51,7 @@ import (
 type PMultiWriter struct {
 	sync.RWMutex
 	writers []io.Writer
+	closed  chan struct{}
 }
 
 // PMultiWriterError is an error that occurs when writing to multiple writers.
@@ -76,17 +79,20 @@ func (e PMultiWriterError) Error() string {
 // writer returns an error, that overall write operation stops and returns the
 // error; it does not continue down the list.
 func New(writers ...io.Writer) *PMultiWriter {
-	pmw := &PMultiWriter{writers: writers}
+	pmw := &PMultiWriter{writers: writers, closed: make(chan struct{})}
 	return pmw
 }
 
 // Write writes some bytes to all the writers.
 func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 	pmw.RLock()
-	defer pmw.RUnlock()
+	// Copy the writers so we can release the lock
+	writers := make([]io.Writer, len(pmw.writers))
+	copy(writers, pmw.writers)
+	pmw.RUnlock()
 
-	errs := make(chan error, len(pmw.writers))
-	for _, w := range pmw.writers {
+	errs := make(chan error, len(writers))
+	for _, w := range writers {
 		go func(w io.Writer) {
 			n, err := w.Write(p)
 			// Forward the error and early return
@@ -103,13 +109,19 @@ func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 
 	// Wait for all writes to finish. If an error occurs, return it.
 	errors := make([]error, 0)
-	for range pmw.writers {
-		if err := <-errs; err != nil {
-			errors = append(errors, err)
+	for range writers {
+		select {
+		case <-pmw.closed:
+			slog.Debug("closed pmw", "pmw", pmw)
+			return 0, io.ErrClosedPipe
+		case err := <-errs:
+			if err != nil {
+				errors = append(errors, err)
+			}
 		}
 	}
 	if len(errors) > 0 {
-		return len(p), PMultiWriterError{Errors: errors, Writers: len(pmw.writers)}
+		return 0, PMultiWriterError{Errors: errors, Writers: len(writers)}
 	}
 
 	return len(p), nil
@@ -121,12 +133,9 @@ func (pmw *PMultiWriter) Add(w io.Writer) {
 	defer pmw.Unlock()
 
 	// Check if the writer is already in the list
-	for _, ew := range pmw.writers {
-		if ew == w {
-			return
-		}
+	if !slices.Contains(pmw.writers, w) {
+		pmw.writers = append(pmw.writers, w)
 	}
-	pmw.writers = append(pmw.writers, w)
 }
 
 // Remove will remove a previously added writer from the list of writers.
@@ -145,16 +154,20 @@ func (pmw *PMultiWriter) Remove(w io.Writer) {
 
 // Closes all the writers in the list.
 func (pmw *PMultiWriter) Close() error {
-	pmw.Lock()
-	defer pmw.Unlock()
+	pmw.RLock()
+	defer pmw.RUnlock()
 
 	var errors []error
+
+	close(pmw.closed)
 	for _, w := range pmw.writers {
 		if c, ok := w.(io.Closer); ok {
 			if err := c.Close(); err != nil {
 				errors = append(errors, err)
 			}
+			slog.Debug("closed", "w", w)
 		}
+		/* there could be non-closeable writers. Rely on the channel to exit the goroutine */
 	}
 	if len(errors) > 0 {
 		return PMultiWriterError{Errors: errors, Writers: len(pmw.writers)}
