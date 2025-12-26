@@ -25,10 +25,8 @@ jobs:
         run: go build -v ./...
       - name: Test
         run: go test -v ./... -json | tee TestResults-${{ matrix.go-version }}.json
-      - name: Debug output
-        run: ls -l TestResults-${{ matrix.go-version }}.json && cat TestResults-${{ matrix.go-version }}.json | head -n 20
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
           name: Go-results-${{ matrix.go-version }}
-          path: TestResults-${{ matrix.go-version }}.json
+          path: acexy/TestResults-${{ matrix.go-version }}.json
