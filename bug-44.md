@@ -31,7 +31,12 @@ The `PMultiWriter.Write` method in `acexy/lib/pmw/pmw.go` was modified to:
 3. Release `RLock` immediately.
 4. Perform the writes using the local copy.
 
-This ensures that `Add` and `Remove` operations can proceed even if a `Write` operation is blocked waiting for a slow client.
+### Slow Consumer Eviction
+Additionally, `PMultiWriter` now supports automatic eviction of slow consumers:
+- Each `Write` operation is protected by a `writeTimeout` (defaulting to 5 seconds).
+- If a writer stalls and exceeds this timeout, it is automatically removed from the `PMultiWriter` broadcast list.
+- This prevents a single bad client from blocking the entire data stream for other healthy clients.
+- Even if a write is stalled, the main proxy remains responsive because the state is decoupled from the actual IO operations.
 
 ## Verification
 The regression test `acexy/repro_test.go` passes with the fix applied.

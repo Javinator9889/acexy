@@ -36,12 +36,14 @@
 package pmw
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // PMultiWriter is an implementation of an "io.Writer" that duplicates its writes
@@ -50,8 +52,10 @@ import (
 // goroutine, so the writes are done in parallel.
 type PMultiWriter struct {
 	sync.RWMutex
-	writers []io.Writer
-	closed  chan struct{}
+	writers      []io.Writer
+	closed       chan struct{}
+	ctx          context.Context
+	writeTimeout time.Duration
 }
 
 // PMultiWriterError is an error that occurs when writing to multiple writers.
@@ -78,12 +82,18 @@ func (e PMultiWriterError) Error() string {
 // Each write is written to each listed writer, one at a time. If a listed
 // writer returns an error, that overall write operation stops and returns the
 // error; it does not continue down the list.
-func New(writers ...io.Writer) *PMultiWriter {
-	pmw := &PMultiWriter{writers: writers, closed: make(chan struct{})}
+func New(ctx context.Context, writeTimeout time.Duration, writers ...io.Writer) *PMultiWriter {
+	pmw := &PMultiWriter{
+		writers:      writers,
+		closed:       make(chan struct{}),
+		ctx:          ctx,
+		writeTimeout: writeTimeout,
+	}
 	return pmw
 }
 
 // Write writes some bytes to all the writers.
+// If a writer takes longer than the configured timeout, it is removed from the list.
 func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 	pmw.RLock()
 	// Copy the writers so we can release the lock
@@ -91,35 +101,54 @@ func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 	copy(writers, pmw.writers)
 	pmw.RUnlock()
 
-	errs := make(chan error, len(writers))
+	if len(writers) == 0 {
+		return len(p), nil
+	}
+
+	type writeResult struct {
+		w   io.Writer
+		err error
+	}
+
+	results := make(chan writeResult, len(writers))
 	for _, w := range writers {
 		go func(w io.Writer) {
-			n, err := w.Write(p)
-			// Forward the error and early return
-			if err != nil || n < len(p) {
-				if err == nil && n < len(p) {
-					err = io.ErrShortWrite
-				}
-				errs <- err
-			} else {
-				errs <- nil
+			done := make(chan error, 1)
+			go func() {
+				_, err := w.Write(p)
+				done <- err
+			}()
+
+			select {
+			case err := <-done:
+				results <- writeResult{w: w, err: err}
+			case <-time.After(pmw.writeTimeout):
+				slog.Warn("writer timed out, removing", "writer", w)
+				results <- writeResult{w: w, err: context.DeadlineExceeded}
+				// Asynchronously remove the slow writer
+				go pmw.Remove(w)
+			case <-pmw.closed:
+				results <- writeResult{w: w, err: io.ErrClosedPipe}
+			case <-pmw.ctx.Done():
+				results <- writeResult{w: w, err: pmw.ctx.Err()}
 			}
 		}(w)
 	}
 
-	// Wait for all writes to finish. If an error occurs, return it.
+	// Wait for all writes to finish or timeout. If an error occurs, return it.
 	errors := make([]error, 0)
 	for range writers {
 		select {
 		case <-pmw.closed:
 			slog.Debug("closed pmw", "pmw", pmw)
 			return 0, io.ErrClosedPipe
-		case err := <-errs:
-			if err != nil {
-				errors = append(errors, err)
+		case res := <-results:
+			if res.err != nil {
+				errors = append(errors, res.err)
 			}
 		}
 	}
+
 	if len(errors) > 0 {
 		return 0, PMultiWriterError{Errors: errors, Writers: len(writers)}
 	}

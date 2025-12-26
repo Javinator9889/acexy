@@ -5,6 +5,7 @@
 package acexy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,7 +152,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		done:    make(chan struct{}),
 		player:  nil,
 		stream:  stream,
-		writers: pmw.New(),
+		writers: pmw.New(context.Background(), 5*time.Second),
 	}
 	slog.Info("Started new stream", "id", aceId, "clients", a.streams[aceId].clients)
 	return stream, nil
