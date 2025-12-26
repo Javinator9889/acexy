@@ -14,13 +14,15 @@ Since `StartStream` and `StopStream` (which call `Add`/`Remove`) are called with
 
 ## Reproduction
 A synthetic test case was created in `acexy/repro_test.go` (`TestDeadlockReproduction`).
-The test simulates:
+The test is self-contained and uses a mock AceStream backend (`startMockBackend`) created with `httptest.NewServer`. It simulates:
 1. Client A connecting and blocking reads (filling the buffer).
 2. Client B connecting to the same stream.
 3. Client B disconnecting (triggering `StopStream` -> `Remove`).
 4. Client C connecting to a different stream (triggering `StartStream` -> `Lock`).
 
-Before the fix, Client C would time out because `StopStream` for Client B was blocked, holding the locks.
+### Verification of Test and Fix
+- **Without the fix**: The test consistently fails with a timeout because Step 4 (Client C connecting) is blocked by the deadlock.
+- **With the fix**: The test passes consistently, even under parallel stress testing.
 
 ## Fix
 The `PMultiWriter.Write` method in `acexy/lib/pmw/pmw.go` was modified to:
