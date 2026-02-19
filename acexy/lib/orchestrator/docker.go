@@ -2,14 +2,22 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 )
+
+// randomHex genera un string hexadecimal aleatorio de n bytes
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 const (
 	aceStreamVolumeBind = "/opt/docker/volumes/localstreams/acestream:/home/localstreams/.ACEStream"
@@ -27,9 +35,10 @@ func containerRemoveOptions() container.RemoveOptions {
 
 // createContainer crea y arranca un contenedor AceStream según el profile.
 // La comunicación se hace container-to-container en la misma red Docker (puerto interno 6878).
-// Devuelve (containerID, host, error)
-func (o *Orchestrator) createContainer(ctx context.Context) (string, string, error) {
-	containerName := fmt.Sprintf("acestream-%d", time.Now().UnixNano())
+// Devuelve (containerID, containerName, host, error)
+func (o *Orchestrator) createContainer(ctx context.Context) (string, string, string, error) {
+	hash := randomHex(6)
+	containerName := fmt.Sprintf("acestream-%s", hash)
 
 	cfg := &container.Config{
 		Image: o.image,
@@ -51,19 +60,19 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, err
 
 	resp, err := o.dockerClient.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, containerName)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create container: %w", err)
+		return "", "", "", fmt.Errorf("failed to create container: %w", err)
 	}
 
 	if err := o.dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
-		return "", "", fmt.Errorf("failed to start container: %w", err)
+		return "", "", "", fmt.Errorf("failed to start container: %w", err)
 	}
 
 	// En modo regular conectamos explícitamente a la red tras arrancar
 	if o.profile != "vpn" {
 		if err := o.dockerClient.NetworkConnect(ctx, regularNetwork, resp.ID, &network.EndpointSettings{}); err != nil {
 			_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
-			return "", "", fmt.Errorf("failed to connect container to network %s: %w", regularNetwork, err)
+			return "", "", "", fmt.Errorf("failed to connect container to network %s: %w", regularNetwork, err)
 		}
 		slog.Debug("Container connected to network", "network", regularNetwork, "containerID", resp.ID[:12])
 	}
@@ -72,11 +81,11 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, err
 	host, err := o.getContainerHost(ctx, resp.ID)
 	if err != nil {
 		_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
-		return "", "", fmt.Errorf("failed to get container host: %w", err)
+		return "", "", "", fmt.Errorf("failed to get container host: %w", err)
 	}
 
-	slog.Info("Container created and started", "id", resp.ID[:12], "host", host)
-	return resp.ID, host, nil
+	slog.Info("Container created and started", "name", containerName, "id", resp.ID[:12], "host", host)
+	return resp.ID, containerName, host, nil
 }
 
 // containerExists verifica si un contenedor con ese ID existe en Docker

@@ -23,6 +23,7 @@ const (
 // AceStreamInstance representa una instancia de contenedor AceStream en el pool
 type AceStreamInstance struct {
 	ContainerID   string
+	Name          string // nombre del contenedor, ej: acestream-2968d06067f1
 	Host          string
 	Port          int
 	Health        HealthStatus
@@ -142,7 +143,7 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 
 	slog.Info("Scaling up new AceStream instance", "profile", o.profile, "image", o.image)
 
-	containerID, host, err := o.createContainer(ctx)
+	containerID, containerName, host, err := o.createContainer(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}
@@ -152,6 +153,7 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 
 	instance := &AceStreamInstance{
 		ContainerID:  containerID,
+		Name:         containerName,
 		Host:         host,
 		Port:         aceStreamPort,
 		Health:       Unhealthy,
@@ -159,7 +161,7 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 		LastActivity: time.Now(),
 	}
 
-	slog.Info("Waiting for instance to be healthy", "containerID", containerID, "host", host, "port", aceStreamPort)
+	slog.Info("Waiting for instance to be healthy", "name", containerName, "host", host, "port", aceStreamPort)
 	if err := o.waitForHealthy(instance); err != nil {
 		// Si no arranca limpiamos el contenedor
 		_ = o.removeContainer(ctx, containerID)
@@ -173,7 +175,7 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 	o.instances[containerID] = instance
 	o.mutex.Unlock()
 
-	slog.Info("New instance ready", "containerID", containerID, "host", host, "port", aceStreamPort)
+	slog.Info("New instance ready", "name", containerName, "host", host, "port", aceStreamPort)
 	return instance, nil
 }
 
@@ -226,7 +228,7 @@ func (o *Orchestrator) ScaleDownLoop() {
 			if len(o.instances) <= o.minReplicas {
 				break
 			}
-			slog.Info("Scaling down idle instance", "containerID", id[:12],
+			slog.Info("Scaling down idle instance", "name", instance.Name,
 				"idleSince", instance.LastActivity)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := o.dockerClient.ContainerRemove(ctx, id, containerRemoveOptions()); err != nil {
@@ -250,7 +252,7 @@ func (o *Orchestrator) Shutdown() {
 
 	slog.Info("Shutting down orchestrator, removing all instances", "count", len(o.instances))
 	for id, instance := range o.instances {
-		slog.Info("Removing instance", "containerID", id[:12], "host", instance.Host)
+		slog.Info("Removing instance", "name", instance.Name, "host", instance.Host)
 		if err := o.dockerClient.ContainerRemove(ctx, id, containerRemoveOptions()); err != nil {
 			slog.Warn("Failed to remove instance", "containerID", id[:12], "error", err)
 		}

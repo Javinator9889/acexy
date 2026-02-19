@@ -1,5 +1,5 @@
 services:
-  acexy-orchestrator:
+  acexy:
     build:
       context: .
       dockerfile: Dockerfile

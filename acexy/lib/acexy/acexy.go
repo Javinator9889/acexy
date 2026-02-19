@@ -156,7 +156,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		// si dos streams llegan a la vez, el segundo ya verá ActiveStreams=1
 		instance.ActiveStreams++
 		instance.LastActivity = time.Now()
-		slog.Debug("Instance stream count", "containerID", instance.ContainerID[:12],
+		slog.Debug("Instance stream count", "instance", instance.Name,
 			"activeStreams", instance.ActiveStreams)
 
 		middlewareResp, err = GetStreamFromInstance(instance, a, aceId, extraParams)
@@ -209,11 +209,30 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 
 	// Register the new client
 	ongoingStream.clients++
+
+	// Calcular total de clientes en todos los streams
+	var totalClients uint
+	for _, s := range a.streams {
+		totalClients += s.clients
+	}
+
 	if ongoingStream.player != nil {
-		slog.Info("Reusing existing stream", "id", stream.ID, "clients", ongoingStream.clients)
+		if ongoingStream.instance != nil {
+			slog.Info("Reusing existing stream", "id", stream.ID, "stream_clients", ongoingStream.clients,
+				"total_clients", totalClients, "instance", ongoingStream.instance.Name)
+		} else {
+			slog.Info("Reusing existing stream", "id", stream.ID, "stream_clients", ongoingStream.clients,
+				"total_clients", totalClients)
+		}
 		return nil
 	}
-	slog.Info("Started new stream", "id", stream.ID, "clients", ongoingStream.clients)
+	if ongoingStream.instance != nil {
+		slog.Info("Started new stream", "id", stream.ID, "stream_clients", ongoingStream.clients,
+			"total_clients", totalClients, "instance", ongoingStream.instance.Name)
+	} else {
+		slog.Info("Started new stream", "id", stream.ID, "stream_clients", ongoingStream.clients,
+			"total_clients", totalClients)
+	}
 
 	// Check if the stream is already being played
 
@@ -284,7 +303,7 @@ func (a *Acexy) releaseStream(stream *AceStream) error {
 			ongoingStream.instance.ActiveStreams--
 		}
 		ongoingStream.instance.LastActivity = time.Now()
-		slog.Debug("Instance stream count after release", "containerID", ongoingStream.instance.ContainerID[:12],
+		slog.Debug("Instance stream count after release", "instance", ongoingStream.instance.Name,
 			"activeStreams", ongoingStream.instance.ActiveStreams)
 	}
 
