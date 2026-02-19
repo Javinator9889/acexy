@@ -129,7 +129,6 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 
 	// Check if the stream is already enqueued — no tocar instancias, el PMultiWriter ya distribuye
 	if stream, ok := a.streams[aceId]; ok {
-		slog.Info("Reusing existing", "stream", aceId, "clients", stream.clients)
 		return stream.stream, nil
 	}
 
@@ -189,7 +188,6 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		writers:  pmw.New(),
 		instance: instance,
 	}
-	slog.Info("Started new stream", "id", aceId, "clients", a.streams[aceId].clients)
 	return stream, nil
 }
 
@@ -209,11 +207,13 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 
 	// Register the new client
 	ongoingStream.clients++
-
-	// Check if the stream is already being played
 	if ongoingStream.player != nil {
+		slog.Info("Reusing existing stream", "id", stream.ID, "clients", ongoingStream.clients)
 		return nil
 	}
+	slog.Info("Started new stream", "id", stream.ID, "clients", ongoingStream.clients)
+
+	// Check if the stream is already being played
 
 	resp, err := a.middleware.Get(stream.PlaybackURL)
 	if err != nil {

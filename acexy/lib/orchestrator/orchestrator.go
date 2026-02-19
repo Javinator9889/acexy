@@ -208,6 +208,38 @@ func (o *Orchestrator) removeContainer(ctx context.Context, containerID string) 
 	return o.dockerClient.ContainerRemove(ctx, containerID, containerRemoveOptions())
 }
 
+// ScaleDownLoop revisa periódicamente las instancias idle y las elimina si procede.
+// Debe ejecutarse en una goroutine separada.
+func (o *Orchestrator) ScaleDownLoop() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		o.mutex.Lock()
+		for id, instance := range o.instances {
+			if instance.ActiveStreams > 0 {
+				continue
+			}
+			if time.Since(instance.LastActivity) <= o.idleTimeout {
+				continue
+			}
+			if len(o.instances) <= o.minReplicas {
+				break
+			}
+			slog.Info("Scaling down idle instance", "containerID", id[:12],
+				"idleSince", instance.LastActivity)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := o.dockerClient.ContainerRemove(ctx, id, containerRemoveOptions()); err != nil {
+				slog.Warn("Failed to remove idle instance", "containerID", id[:12], "error", err)
+			} else {
+				delete(o.instances, id)
+			}
+			cancel()
+		}
+		o.mutex.Unlock()
+	}
+}
+
 // Shutdown elimina todos los contenedores del pool de forma ordenada
 func (o *Orchestrator) Shutdown() {
 	o.mutex.Lock()

@@ -405,6 +405,7 @@ func main() {
 		slog.Error("Failed to initialize orchestrator", "error", err)
 		os.Exit(1)
 	}
+	go orch.ScaleDownLoop()
 
 	// Create a new Acexy instance
 	acexy := &acexy.Acexy{
