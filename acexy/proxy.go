@@ -42,6 +42,8 @@ var (
 	composeProfile     string
 	acestreamImage     string
 	dockerHost         string
+	stallTimeout           time.Duration
+	stallCheckInterval     time.Duration
 )
 
 //go:embed LICENSE.short
@@ -376,6 +378,20 @@ func parseArgs() {
 		LookupEnvOrString("DOCKER_HOST", "tcp://docker-proxy:2375"),
 		"Docker host URL (socket proxy recommended). Can be set with DOCKER_HOST environment variable",
 	)
+	flag.DurationVar(
+		&stallTimeout,
+		"stall-timeout",
+		LookupEnvOrDuration("ACESTREAM_STALL_TIMEOUT", 30*time.Second),
+		"time without receiving stream data after which the stream is considered stalled and closed. "+
+			"Can be set with ACESTREAM_STALL_TIMEOUT environment variable. Set to 0 to disable",
+	)
+	flag.DurationVar(
+		&stallCheckInterval,
+		"stall-check-interval",
+		LookupEnvOrDuration("ACESTREAM_STALL_CHECK_INTERVAL", 10*time.Second),
+		"how often the stall watchdog checks for inactive streams. "+
+			"Can be set with ACESTREAM_STALL_CHECK_INTERVAL environment variable",
+	)
 	flag.Parse()
 }
 
@@ -416,6 +432,8 @@ func main() {
 		EmptyTimeout:      emptyTimeout,
 		BufferSize:        int(size.Bytes),
 		NoResponseTimeout: noResponseTimeout,
+		StallTimeout:          stallTimeout,
+		StallCheckInterval:    stallCheckInterval,
 		Orchestrator:      orch,
 	}
 	acexy.Init()

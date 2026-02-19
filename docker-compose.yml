@@ -21,8 +21,9 @@ services:
       # Orchestrator config
       ACESTREAM_MIN_REPLICAS: "1"
       ACESTREAM_MAX_REPLICAS: "5"
-      ACESTREAM_STREAMS_PER_INSTANCE: "1"
+      ACESTREAM_STREAMS_PER_INSTANCE: "2"
       ACESTREAM_IDLE_TIMEOUT: "60s"
+      ACESTREAM_STALL_TIMEOUT: "20s"
       ACESTREAM_IMAGE: "martinbjeldbak/acestream-http-proxy:latest"
       COMPOSE_PROFILE: "regular"
 

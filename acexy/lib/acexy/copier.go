@@ -19,19 +19,29 @@ type Copier struct {
 	EmptyTimeout time.Duration
 	// The buffer size to use when copying the data.
 	BufferSize int
+	// StallTimeout is the time without receiving any data after which the stream
+	// is considered stalled and forcibly closed. Zero disables the watchdog.
+	StallTimeout time.Duration
+	// StallCheckInterval is how often the watchdog checks for a stalled stream.
+	StallCheckInterval time.Duration
+	// StreamID is used for logging purposes only.
+	StreamID string
 
 	/**! Private Data */
 	timer          *time.Timer
 	bufferedWriter *bufio.Writer
+	lastDataTime   time.Time
 }
 
 // Starts copying the data from the source to the destination.
 func (c *Copier) Copy() error {
 	c.bufferedWriter = bufio.NewWriterSize(c.Destination, c.BufferSize)
 	c.timer = time.NewTimer(c.EmptyTimeout)
+	c.lastDataTime = time.Now()
 	done := make(chan struct{})
 	defer close(done)
 
+	// Empty timeout goroutine
 	go func() {
 		for {
 			c.timer.Reset(c.EmptyTimeout)
@@ -55,6 +65,35 @@ func (c *Copier) Copy() error {
 		}
 	}()
 
+	// Stall watchdog goroutine
+	if c.StallTimeout > 0 {
+		checkInterval := c.StallCheckInterval
+		if checkInterval <= 0 {
+			checkInterval = 10 * time.Second
+		}
+		go func() {
+			ticker := time.NewTicker(checkInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					if time.Since(c.lastDataTime) > c.StallTimeout {
+						slog.Warn("Stream stalled, no data received, closing",
+							"stream", c.StreamID,
+							"stallTimeout", c.StallTimeout,
+						)
+						if closer, ok := c.Source.(io.Closer); ok {
+							closer.Close()
+						}
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	_, err := io.Copy(c, c.Source)
 	return err
 }
@@ -67,8 +106,9 @@ func (c *Copier) Write(p []byte) (n int, err error) {
 	if c.timer == nil || c.bufferedWriter == nil {
 		return 0, io.ErrClosedPipe
 	}
-	// Reset the timer, since we have data to write
+	// Reset the timer and update last data time since we have data to write
 	c.timer.Reset(c.EmptyTimeout)
+	c.lastDataTime = time.Now()
 	// Write the data to the destination
 	return c.bufferedWriter.Write(p)
 }

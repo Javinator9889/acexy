@@ -8,6 +8,7 @@
 - [How It Works? 🛠](#how-it-works-)
 - [Key Features 🔗](#key-features-)
 - [Usage 📐](#usage-)
+- [Dynamic Orchestration 🐳](#dynamic-orchestration-)
 - [Optimizing 🚀](#optimizing-)
   - [Alternative 🧃](#alternative-)
 - [Configuration Options ⚙](#configuration-options-)
@@ -52,6 +53,14 @@ When using `acexy`, you automatically have:
 * **Stream Multiplexing** 🕎: The same stream can be reproduced *at the
   same time in multiple clients*.
 * **Resilient, error-proof** streaming thanks to the HTTP Middleware 🛡.
+* **Dynamic AceStream Orchestration** 🐳: Automatically spin up and tear down AceStream
+  containers on demand — no manual management required.
+* **Intelligent Load Balancing** ⚖️: Streams are distributed across instances based on
+  current load, respecting a configurable maximum of concurrent streams per instance.
+* **Auto Scale-Down** 📉: Idle instances are automatically removed after a configurable
+  timeout, keeping resource usage minimal.
+* **Graceful Shutdown** 🛑: All dynamically created containers are cleaned up automatically
+  when acexy stops.
 * *Blazing fast, minimal proxy* ☄ written in Go!
 
 With this proxy, the following architecture is now possible:
@@ -60,42 +69,16 @@ With this proxy, the following architecture is now possible:
 
 ## Usage 📐
 
-`acexy` is available and published as a Docker image. Make sure you have
-the latest [Docker](https://docker.com) image installed and available.
+`acexy` is available as a Docker image. Make sure you have the latest
+[Docker](https://docker.com) installed and available.
 
-The Acexy container will connect against an AceStream server. You need to
-deploy either a Docker image, and link Acexy within the same network; Or
-have a running AceStream version on your host and run Acexy in host-networked
-mode.
-
-> **INFO**: There is a `docker-compose.yml` file in the repo you can directly
-> use to launch the whole block. This is **the recommended setup starting
-> from `v0.2.0`**.
-
-To run the services block, first grab the `docker-compose.yml` file, and run:
+The recommended setup uses Docker Compose, which handles acexy, the Docker
+socket proxy, and the dynamic AceStream instances automatically:
 
 ```shell
 wget https://raw.githubusercontent.com/Javinator9889/acexy/refs/heads/main/docker-compose.yml
-docker compose run -d
+docker compose up -d
 ```
-
-If you don't want to use Docker Compose, assuming you already have an
-AceStream server, another way could be:
-
-```shell
-docker run --network host ghcr.io/javinator9889/acexy
-```
-
-> **NOTE**: For your convenience, a `docker-compose.yml` file is given with
-> all the possible adjustable parameters. It should be ready to run, and it's
-> the recommended way starting from `v0.2.0`.
-
-By default, the proxy will work in MPEG-TS mode. For switching between them,
-you must add the **`-m3u8` flag** or set **`ACEXY_M3U8=true` environment
-variable**.
-
-> **NOTE**: The HLS mode - `ACEXY_M3U8` or `-m3u8` flag - is in a non-tested
-> status. Using it is discouraged and not guaranteed to work.
 
 There is a single available endpoint: `/ace/getstream` which takes the same
 parameters as the standard
@@ -106,52 +89,48 @@ for running a stream, just open the following link in your preferred application
 http://127.0.0.1:8080/ace/getstream?id=dd1e67078381739d14beca697356ab76d49d1a2
 ```
 
-where `dd1e67078381739d14beca697356ab76d49d1a2` is the ID of the AceStream 
-channel.
+where `dd1e67078381739d14beca697356ab76d49d1a2` is the ID of the AceStream channel.
 
-## Optimizing 🚀
+You can also check the status of active streams at any time:
 
-The AceStream Engine running behind of the proxy has a number of ports that can
-be exposed to optimize the performance. Those are, by default:
-
-- `8621/tcp`
-- `8621/udp`
-
-> NOTE: They can be adjusted through the `EXTRA_FLAGS` variable - within Docker - by
-> using the `--port` flag.
-
-Exposing those ports should help getting a more stable streaming experience. Notice
-that you will need to open up those ports on your gateway too.
-
-For reference, this is how you should run the Docker command:
-
-```shell
-docker run -t -p 8080:8080 -p 8621:8621 ghcr.io/javinator9889/acexy
+```
+http://127.0.0.1:8080/ace/status
 ```
 
-### Alternative 🧃
+By default, the proxy will work in MPEG-TS mode. For switching between them,
+you must add the **`-m3u8` flag** or set **`ACEXY_M3U8=true` environment variable**.
 
-AceStream underneath attempts to use UPnP IGD to connect against a remote machine.
-The problem is that this is not working because of the bridging layer added by Docker
-(see: https://docs.docker.com/engine/network/drivers/bridge/).
+> **NOTE**: The HLS mode - `ACEXY_M3U8` or `-m3u8` flag - is in a non-tested
+> status. Using it is discouraged and not guaranteed to work.
 
-If you are running a single instance of Acexy - and a single instance of AceStream -
-it should be safe for you to run the container with *host networking*. This means:
+## Dynamic Orchestration 🐳
 
-- The container **can access** any other application bridged to your main network.
-- You **don't need** to expose any ports.
-- Performance **is optimized** a little bit.
+acexy includes a built-in orchestrator that manages AceStream containers automatically.
+There is **no need to run or manage AceStream manually** — acexy handles everything.
 
-> NOTE: This only works on Linux environments. See https://docs.docker.com/engine/network/drivers/host/
-> for more information.
+**How it works:**
 
-The command is quite straightforward:
+- On startup, acexy creates `ACESTREAM_MIN_REPLICAS` AceStream containers and waits for
+  them to be healthy before accepting requests.
+- When a new stream is requested and all existing instances are at capacity
+  (`ACESTREAM_STREAMS_PER_INSTANCE`), acexy automatically spins up a new instance
+  (up to `ACESTREAM_MAX_REPLICAS`).
+- Instances with no active streams are automatically removed after `ACESTREAM_IDLE_TIMEOUT`
+  seconds, as long as the number of instances stays above `ACESTREAM_MIN_REPLICAS`.
+- On shutdown (`SIGTERM` / `SIGINT`), all dynamically created containers are removed cleanly.
 
-```shell
-docker run -t --network host ghcr.io/javinator9889/acexy
-```
+**Requirements:**
 
-That should enable AceStream to use UPnP freely.
+The orchestrator communicates with Docker via a socket proxy for security. The
+`docker-compose.yml` includes the `tecnativa/docker-socket-proxy` service preconfigured.
+You should never mount the Docker socket directly into acexy.
+
+**VPN support:**
+
+Set `COMPOSE_PROFILE=vpn` to route AceStream traffic through a
+[Gluetun](https://github.com/qdm12/gluetun) container. Uncomment the `gluetun` service
+in `docker-compose.yml` and configure your VPN provider. In this mode, AceStream
+instances use Gluetun's network namespace instead of the shared bridge network.
 
 ## Configuration Options ⚙
 
@@ -164,6 +143,13 @@ to fit your needs.
 As Acexy was thought to be run inside a Docker container, all the variables and settings are
 adjustable by using environment variables.
 
+
+Acexy has tons of configuration options. All of them have default values tested for optimal
+experience, but you may need to adjust them to fit your needs.
+
+> **PRO-TIP**: You can issue `acexy -help` to have a complete view of all the available options.
+
+### Proxy Options
 
 <table>
   <thead>
@@ -180,90 +166,136 @@ adjustable by using environment variables.
       <th>-</th>
       <th>Prints the program license and exits</th>
       <th>-</th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-help</code></th>
       <th>-</th>
       <th>Prints the help message and exits</th>
       <th>-</th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-addr</code></th>
       <th><code>ACEXY_LISTEN_ADDR</code></th>
-      <th>Address where Acexy is listening to. Useful when running in <code>host</code> mode.</th>
+      <th>Address where Acexy is listening to.</th>
       <th><code>:8080</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-scheme</code></th>
       <th><code>ACEXY_SCHEME</code></th>
-      <th>
-        The scheme of the AceStream middleware. If you have configured AceStream to work in HTTPS,
-        you will have to tweak this value.
-      </th>
+      <th>The scheme of the AceStream middleware.</th>
       <th><code>http</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-acestream-host</code></th>
       <th><code>ACEXY_HOST</code></th>
-      <th>
-        Where the AceStream middleware is located. Change it if you need Acexy to connect to a
-        different AceStream Engine.
-      </th>
+      <th>Fallback AceStream host (used when orchestration is disabled).</th>
       <th><code>localhost</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-acestream-port</code></th>
       <th><code>ACEXY_PORT</code></th>
-      <th>
-        The port to connect to the AceStream middleware. Change it if you need Acexy to connect
-        to a different AceStream Engine.
-      </th>
+      <th>Fallback AceStream port (used when orchestration is disabled).</th>
       <th><code>6878</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-m3u8-stream-timeout</code></th>
       <th><code>ACEXY_M3U8_STREAM_TIMEOUT</code></th>
-      <th>
-        When running Acexy in M3U8 mode, the timeout to consider a stream is done.
-      </th>
+      <th>When running in M3U8 mode, the timeout to consider a stream is done.</th>
       <th><code>60s</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-m3u8</code></th>
       <th><code>ACEXY_M3U8</code></th>
-      <th>
-        Enable M3U8 mode in Acexy. <b>WARNING</b>: This mode is experimental and may not work as expected.
-      </th>
+      <th>Enable M3U8 mode. <b>WARNING</b>: Experimental, may not work as expected.</th>
       <th>Disabled</th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-empty-timeout</code></th>
       <th><code>ACEXY_EMPTY_TIMEOUT</code></th>
-      <th>
-        Timeout to consider a stream is finished once empty information is received from
-        the middleware. Useless when in M3U8 mode.
-      </th>
+      <th>Timeout to consider a stream finished once no data is received from the middleware.</th>
       <th><code>1m</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-buffer-size</code></th>
       <th><code>ACEXY_BUFFER_SIZE</code></th>
-      <th>
-        Buffers up-to <code>buffer-size</code> bytes of a stream before copying the data to the
-        player. Useful to have better stability during plays.
-      </th>
+      <th>Buffer size before copying stream data to players. Increase for better stability.</th>
       <th><code>4.2MiB</code></th>
-    <tr>
+    </tr>
     <tr>
       <th><code>-no-response-timeout</code></th>
       <th><code>ACEXY_NO_RESPONSE_TIMEOUT</code></th>
-      <th>
-        Time to wait for the AceStream middleware to return a response for a newly opened stream.
-        This must be as low as possible unless your Internet connection is really bad
-        (ie: You have very big latencies).
-      </th>
+      <th>Time to wait for the AceStream middleware to respond to a new stream request.</th>
       <th><code>1s</code></th>
+    </tr>
+  </tbody>
+</table>
+
+### Orchestrator Options
+
+<table>
+  <thead>
     <tr>
+      <th>Flag</th>
+      <th>Environment Variable</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th><code>-min-replicas</code></th>
+      <th><code>ACESTREAM_MIN_REPLICAS</code></th>
+      <th>Minimum number of AceStream instances to keep running at all times.</th>
+      <th><code>1</code></th>
+    </tr>
+    <tr>
+      <th><code>-max-replicas</code></th>
+      <th><code>ACESTREAM_MAX_REPLICAS</code></th>
+      <th>Maximum number of AceStream instances allowed.</th>
+      <th><code>5</code></th>
+    </tr>
+    <tr>
+      <th><code>-streams-per-instance</code></th>
+      <th><code>ACESTREAM_STREAMS_PER_INSTANCE</code></th>
+      <th>Maximum number of concurrent streams per AceStream instance before scaling up.</th>
+      <th><code>3</code></th>
+    </tr>
+    <tr>
+      <th><code>-idle-timeout</code></th>
+      <th><code>ACESTREAM_IDLE_TIMEOUT</code></th>
+      <th>Time after which an idle instance (no active streams) is automatically removed.</th>
+      <th><code>5m</code></th>
+    </tr>
+    <tr>
+      <th><code>-acestream-image</code></th>
+      <th><code>ACESTREAM_IMAGE</code></th>
+      <th>Docker image to use for AceStream instances.</th>
+      <th><code>martinbjeldbak/acestream-http-proxy:latest</code></th>
+    </tr>
+    <tr>
+      <th><code>-compose-profile</code></th>
+      <th><code>COMPOSE_PROFILE</code></th>
+      <th>Network profile for AceStream containers. Use <code>regular</code> for bridge network or <code>vpn</code> to route through Gluetun.</th>
+      <th><code>regular</code></th>
+    </tr>
+    <tr>
+      <th><code>-docker-host</code></th>
+      <th><code>DOCKER_HOST</code></th>
+      <th>Docker host URL. Should point to a Docker socket proxy, never mount the socket directly.</th>
+      <th><code>tcp://docker-proxy:2375</code></th>
+    </tr>
+    <tr>
+      <th><code>-stall-timeout</code></th>
+      <th><code>ACESTREAM_STALL_TIMEOUT</code></th>
+      <th>Time without receiving stream data after which the stream is considered stalled and forcibly closed. Set to <code>0</code> to disable.</th>
+      <th><code>30s</code></th>
+    </tr>
+    <tr>
+      <th><code>-stall-check-interval</code></th>
+      <th><code>ACESTREAM_STALL_CHECK_INTERVAL</code></th>
+      <th>How often the stall watchdog checks for inactive streams.</th>
+      <th><code>10s</code></th>
+    </tr>
   </tbody>
 </table>
 
