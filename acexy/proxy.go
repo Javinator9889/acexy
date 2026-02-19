@@ -6,14 +6,18 @@ package main
 
 import (
 	_ "embed"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"javinator9889/acexy/lib/acexy"
+	"javinator9889/acexy/lib/orchestrator"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/dustin/go-humanize"
@@ -29,6 +33,15 @@ var (
 	emptyTimeout      time.Duration
 	size              Size
 	noResponseTimeout time.Duration
+
+	// Orchestrator config
+	minReplicas        int
+	maxReplicas        int
+	streamsPerInstance int
+	idleTimeout        time.Duration
+	composeProfile     string
+	acestreamImage     string
+	dockerHost         string
 )
 
 //go:embed LICENSE.short
@@ -321,6 +334,48 @@ func parseArgs() {
 			"Can be set with ACEXY_NO_RESPONSE_TIMEOUT environment variable. "+
 			"Depending on the network conditions, you may want to adjust this value",
 	)
+	flag.IntVar(
+		&minReplicas,
+		"min-replicas",
+		LookupEnvOrInt("ACESTREAM_MIN_REPLICAS", 1),
+		"minimum number of AceStream instances to keep running. Can be set with ACESTREAM_MIN_REPLICAS environment variable",
+	)
+	flag.IntVar(
+		&maxReplicas,
+		"max-replicas",
+		LookupEnvOrInt("ACESTREAM_MAX_REPLICAS", 5),
+		"maximum number of AceStream instances allowed. Can be set with ACESTREAM_MAX_REPLICAS environment variable",
+	)
+	flag.IntVar(
+		&streamsPerInstance,
+		"streams-per-instance",
+		LookupEnvOrInt("ACESTREAM_STREAMS_PER_INSTANCE", 3),
+		"maximum number of concurrent streams per AceStream instance. Can be set with ACESTREAM_STREAMS_PER_INSTANCE environment variable",
+	)
+	flag.DurationVar(
+		&idleTimeout,
+		"idle-timeout",
+		LookupEnvOrDuration("ACESTREAM_IDLE_TIMEOUT", 300*time.Second),
+		"time after which an idle AceStream instance is removed. Can be set with ACESTREAM_IDLE_TIMEOUT environment variable",
+	)
+	flag.StringVar(
+		&composeProfile,
+		"compose-profile",
+		LookupEnvOrString("COMPOSE_PROFILE", "regular"),
+		"Docker Compose profile to use (regular or vpn). Can be set with COMPOSE_PROFILE environment variable",
+	)
+	flag.StringVar(
+		&acestreamImage,
+		"acestream-image",
+		LookupEnvOrString("ACESTREAM_IMAGE", "martinbjeldbak/acestream-http-proxy:latest"),
+		"Docker image to use for AceStream instances. Can be set with ACESTREAM_IMAGE environment variable",
+	)
+	flag.StringVar(
+		&dockerHost,
+		"docker-host",
+		LookupEnvOrString("DOCKER_HOST", "tcp://docker-proxy:2375"),
+		"Docker host URL (socket proxy recommended). Can be set with DOCKER_HOST environment variable",
+	)
 	flag.Parse()
 }
 
@@ -336,6 +391,21 @@ func main() {
 	} else {
 		endpoint = acexy.MPEG_TS_ENDPOINT
 	}
+	// Inicializar el Orchestrator
+	orch := &orchestrator.Orchestrator{
+		MinReplicas:        minReplicas,
+		MaxReplicas:        maxReplicas,
+		StreamsPerInstance: streamsPerInstance,
+		IdleTimeout:        idleTimeout,
+		Profile:            composeProfile,
+		Image:              acestreamImage,
+		DockerHost:         dockerHost,
+	}
+	if err := orch.Init(); err != nil {
+		slog.Error("Failed to initialize orchestrator", "error", err)
+		os.Exit(1)
+	}
+
 	// Create a new Acexy instance
 	acexy := &acexy.Acexy{
 		Scheme:            scheme,
@@ -345,6 +415,7 @@ func main() {
 		EmptyTimeout:      emptyTimeout,
 		BufferSize:        int(size.Bytes),
 		NoResponseTimeout: noResponseTimeout,
+		Orchestrator:      orch,
 	}
 	acexy.Init()
 	slog.Debug("Acexy", "acexy", acexy)
@@ -357,9 +428,26 @@ func main() {
 	mux.Handle(APIv1_URL+"/status", proxy)
 	mux.Handle("/", http.NotFoundHandler())
 
+	// Capturar señales de shutdown para limpiar contenedores
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+
+	server := &http.Server{Addr: addr, Handler: mux}
+
+	go func() {
+		<-stop
+		slog.Info("Shutdown signal received, cleaning up...")
+		orch.Shutdown()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			slog.Warn("HTTP server shutdown error", "error", err)
+		}
+	}()
+
 	// Start the HTTP server
 	slog.Info("Starting server", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("Failed to start server", "error", err)
 		os.Exit(1)
 	}

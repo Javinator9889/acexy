@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"javinator9889/acexy/lib/orchestrator"
 	"javinator9889/acexy/lib/pmw"
 	"log/slog"
 	"net"
@@ -63,12 +64,13 @@ type AceStream struct {
 }
 
 type ongoingStream struct {
-	clients uint
-	done    chan struct{}
-	player  *http.Response
-	stream  *AceStream
-	copier  *Copier
-	writers *pmw.PMultiWriter
+	clients  uint
+	done     chan struct{}
+	player   *http.Response
+	stream   *AceStream
+	copier   *Copier
+	writers  *pmw.PMultiWriter
+	instance *orchestrator.AceStreamInstance // nil si no hay orquestación
 }
 
 // Structure referencing the AceStream Proxy - this is, ourselves
@@ -80,6 +82,7 @@ type Acexy struct {
 	EmptyTimeout      time.Duration // Timeout after which, if no data is written, the stream is closed
 	BufferSize        int           // The buffer size to use when copying the data
 	NoResponseTimeout time.Duration // Timeout to wait for a response from the AceStream middleware
+	Orchestrator      *orchestrator.Orchestrator // nil si no hay orquestación dinámica
 
 	// Information about ongoing streams
 	streams    map[AceID]*ongoingStream
@@ -124,34 +127,67 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	// Check if the stream is already enqueued
+	// Check if the stream is already enqueued — no tocar instancias, el PMultiWriter ya distribuye
 	if stream, ok := a.streams[aceId]; ok {
 		slog.Info("Reusing existing", "stream", aceId, "clients", stream.clients)
 		return stream.stream, nil
 	}
 
-	// Enqueue the middleware
-	middleware, err := GetStream(a, aceId, extraParams)
+	// Elegir instancia via orchestrator o fallback al backend estático
+	var middlewareResp *AceStreamMiddleware
+	var err error
+	var instance *orchestrator.AceStreamInstance
+
+	if a.Orchestrator != nil {
+		instance = a.Orchestrator.SelectInstance()
+		if instance == nil {
+			if a.Orchestrator.TotalInstances() < a.Orchestrator.MaxReplicas {
+				instance, err = a.Orchestrator.ScaleUp()
+				if err != nil {
+					slog.Error("Failed to scale up", "error", err)
+					return nil, fmt.Errorf("failed to scale up new instance: %w", err)
+				}
+			} else {
+				return nil, errors.New("max replicas reached, no instance available")
+			}
+		}
+		// Incrementar antes del request para evitar race condition:
+		// si dos streams llegan a la vez, el segundo ya verá ActiveStreams=1
+		instance.ActiveStreams++
+		instance.LastActivity = time.Now()
+		slog.Debug("Instance stream count", "containerID", instance.ContainerID[:12],
+			"activeStreams", instance.ActiveStreams)
+
+		middlewareResp, err = GetStreamFromInstance(instance, a, aceId, extraParams)
+		if err != nil {
+			// Revertir si el request falla
+			instance.ActiveStreams--
+		}
+	} else {
+		middlewareResp, err = GetStream(a, aceId, extraParams)
+	}
+
 	if err != nil {
 		slog.Error("Error getting stream middleware", "error", err)
 		return nil, err
 	}
 
 	// We got the stream information, build the structure around it and register the stream
-	slog.Debug("Middleware Information", "id", aceId, "middleware", middleware)
+	slog.Debug("Middleware Information", "id", aceId, "middleware", middlewareResp)
 	stream := &AceStream{
-		PlaybackURL: middleware.Response.PlaybackURL,
-		StatURL:     middleware.Response.StatURL,
-		CommandURL:  middleware.Response.CommandURL,
+		PlaybackURL: middlewareResp.Response.PlaybackURL,
+		StatURL:     middlewareResp.Response.StatURL,
+		CommandURL:  middlewareResp.Response.CommandURL,
 		ID:          aceId,
 	}
 
 	a.streams[aceId] = &ongoingStream{
-		clients: 0,
-		done:    make(chan struct{}),
-		player:  nil,
-		stream:  stream,
-		writers: pmw.New(),
+		clients:  0,
+		done:     make(chan struct{}),
+		player:   nil,
+		stream:   stream,
+		writers:  pmw.New(),
+		instance: instance,
 	}
 	slog.Info("Started new stream", "id", aceId, "clients", a.streams[aceId].clients)
 	return stream, nil
@@ -234,6 +270,16 @@ func (a *Acexy) releaseStream(stream *AceStream) error {
 	}
 	if ongoingStream.clients > 0 {
 		return fmt.Errorf(`stream "%s" has clients`, stream.ID)
+	}
+
+	// Decrementar ActiveStreams en la instancia cuando el último cliente abandona
+	if ongoingStream.instance != nil {
+		if ongoingStream.instance.ActiveStreams > 0 {
+			ongoingStream.instance.ActiveStreams--
+		}
+		ongoingStream.instance.LastActivity = time.Now()
+		slog.Debug("Instance stream count after release", "containerID", ongoingStream.instance.ContainerID[:12],
+			"activeStreams", ongoingStream.instance.ActiveStreams)
 	}
 
 	// Remove the stream from the list
@@ -435,6 +481,52 @@ func (a *Acexy) GetStatus(id *AceID) (AcexyStatus, error) {
 	}
 
 	return AcexyStatus{}, fmt.Errorf(`stream "%s" not found`, id)
+}
+
+// GetStreamFromInstance realiza la petición al backend de una instancia específica del pool.
+// Es equivalente a GetStream pero usa el host/port de la instancia en lugar del estático.
+func GetStreamFromInstance(instance *orchestrator.AceStreamInstance, a *Acexy, aceId AceID, extraParams url.Values) (*AceStreamMiddleware, error) {
+	slog.Debug("Getting stream from instance", "id", aceId, "host", instance.Host, "port", instance.Port)
+
+	req, err := http.NewRequest("GET", a.Scheme+"://"+instance.Host+":"+strconv.Itoa(instance.Port)+string(a.Endpoint), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	pid := uuid.NewString()
+	slog.Debug("Temporary PID", "pid", pid, "stream", aceId)
+	if extraParams == nil {
+		extraParams = req.URL.Query()
+	}
+	idType, id := aceId.ID()
+	extraParams.Set(string(idType), id)
+	extraParams.Set("format", "json")
+	extraParams.Set("pid", pid)
+	req.Header.Set("Content-Type", "application/json")
+	req.URL.RawQuery = extraParams.Encode()
+
+	slog.Debug("Request URL", "url", req.URL.String())
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var response AceStreamMiddleware
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+
+	if response.Error != "" {
+		return nil, errors.New(response.Error)
+	}
+	return &response, nil
 }
 
 // Creates a timeout channel that will be closed after the given timeout

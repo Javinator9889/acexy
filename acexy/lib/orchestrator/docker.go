@@ -1,0 +1,121 @@
+package orchestrator
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/network"
+)
+
+const (
+	aceStreamVolumeBind = "/opt/docker/volumes/localstreams/acestream:/home/localstreams/.ACEStream"
+	regularNetwork      = "acexy-orchestrator-network"
+	vpnContainer        = "gluetun"
+)
+
+// containerRemoveOptions devuelve las opciones estándar para eliminar contenedores
+func containerRemoveOptions() container.RemoveOptions {
+	return container.RemoveOptions{
+		Force:         true,
+		RemoveVolumes: false, // no eliminar el volumen de caché
+	}
+}
+
+// createContainer crea y arranca un contenedor AceStream según el profile.
+// La comunicación se hace container-to-container en la misma red Docker (puerto interno 6878).
+// Devuelve (containerID, host, error)
+func (o *Orchestrator) createContainer(ctx context.Context) (string, string, error) {
+	containerName := fmt.Sprintf("acestream-%d", time.Now().UnixNano())
+
+	cfg := &container.Config{
+		Image: o.image,
+	}
+
+	hostCfg := &container.HostConfig{
+		Binds:         []string{aceStreamVolumeBind},
+		RestartPolicy: container.RestartPolicy{Name: "no"},
+	}
+
+	netCfg := &network.NetworkingConfig{}
+
+	if o.profile == "vpn" {
+		// En modo VPN usamos la red del contenedor gluetun
+		hostCfg.NetworkMode = container.NetworkMode(fmt.Sprintf("container:%s", vpnContainer))
+	}
+
+	slog.Debug("Creating container", "name", containerName, "image", o.image, "profile", o.profile)
+
+	resp, err := o.dockerClient.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, containerName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create container: %w", err)
+	}
+
+	if err := o.dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
+		return "", "", fmt.Errorf("failed to start container: %w", err)
+	}
+
+	// En modo regular conectamos explícitamente a la red tras arrancar
+	if o.profile != "vpn" {
+		if err := o.dockerClient.NetworkConnect(ctx, regularNetwork, resp.ID, &network.EndpointSettings{}); err != nil {
+			_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
+			return "", "", fmt.Errorf("failed to connect container to network %s: %w", regularNetwork, err)
+		}
+		slog.Debug("Container connected to network", "network", regularNetwork, "containerID", resp.ID[:12])
+	}
+
+	// Obtener la IP del contenedor en la red correcta
+	host, err := o.getContainerHost(ctx, resp.ID)
+	if err != nil {
+		_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
+		return "", "", fmt.Errorf("failed to get container host: %w", err)
+	}
+
+	slog.Info("Container created and started", "id", resp.ID[:12], "host", host)
+	return resp.ID, host, nil
+}
+
+// containerExists verifica si un contenedor con ese ID existe en Docker
+func (o *Orchestrator) containerExists(ctx context.Context, containerID string) bool {
+	f := filters.NewArgs()
+	f.Add("id", containerID)
+	containers, err := o.dockerClient.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: f,
+	})
+	if err != nil {
+		return false
+	}
+	return len(containers) > 0
+}
+
+// getContainerHost obtiene el host al que conectarse para acceder al contenedor.
+// En modo VPN devuelve "localhost" (comparte red con gluetun).
+// En modo regular devuelve la IP del contenedor en acexy-orchestrator-network.
+func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string) (string, error) {
+	if o.profile == "vpn" {
+		return "localhost", nil
+	}
+
+	inspect, err := o.dockerClient.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect container: %w", err)
+	}
+
+	if netSettings, ok := inspect.NetworkSettings.Networks[regularNetwork]; ok {
+		if netSettings.IPAddress != "" {
+			return netSettings.IPAddress, nil
+		}
+	}
+
+	// Fallback: usar la IP de bridge por defecto
+	if inspect.NetworkSettings.IPAddress != "" {
+		return inspect.NetworkSettings.IPAddress, nil
+	}
+
+	return "", fmt.Errorf("could not determine IP for container %s", containerID[:12])
+}

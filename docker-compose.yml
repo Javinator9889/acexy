@@ -1,30 +1,69 @@
 services:
-  acexy:
-    image: ghcr.io/javinator9889/acexy:0.2.0
+  acexy-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: acexy-orchestrator
     restart: unless-stopped
     ports:
-      - 8080:8080/tcp
+      - "8080:8080/tcp"
     environment:
-      ACEXY_LISTEN_ADDR: ":8080"  # Listen on port 8080
-      ACEXY_SCHEME: "http"        # Use HTTP
-      ACEXY_HOST: "acestream"     # Host is "acestream" or the name of the AceStream service
-      ACEXY_PORT: "6878"          # Port is 6878
-      ACEXY_M3U8_STREAM_TIMEOUT: "60s"  # Timeout is 60 seconds when in M3U8 mode
-      ACEXY_M3U8: "false"         # Disable M3U8 mode
-      ACEXY_EMPTY_TIMEOUT: "60s"  # Timeout to close the connection if no data is received
-      ACEXY_BUFFER_SIZE: 4MB      # Buffer size is 4MB
-      ACEXY_NO_RESPONSE_TIMEOUT: "10s"  # Timeout to close the connection if no response is received
-    links:
-      - acestream
-    depends_on:
-      - acestream
+      # Acexy core config
+      ACEXY_LISTEN_ADDR: ":8080"
+      ACEXY_SCHEME: "http"
+      ACEXY_M3U8_STREAM_TIMEOUT: "60s"
+      ACEXY_M3U8: "false"
+      ACEXY_EMPTY_TIMEOUT: "60s"
+      ACEXY_BUFFER_SIZE: "4MB"
+      ACEXY_NO_RESPONSE_TIMEOUT: "10s"
+      ACEXY_LOG_LEVEL: "INFO"
 
-  acestream:
-    image: martinbjeldbak/acestream-http-proxy:latest  # or whatever image you want to use
+      # Orchestrator config
+      ACESTREAM_MIN_REPLICAS: "1"
+      ACESTREAM_MAX_REPLICAS: "5"
+      ACESTREAM_STREAMS_PER_INSTANCE: "1"
+      ACESTREAM_IDLE_TIMEOUT: "300s"
+      ACESTREAM_IMAGE: "martinbjeldbak/acestream-http-proxy:latest"
+      COMPOSE_PROFILE: "regular"
+
+      # Docker socket proxy
+      DOCKER_HOST: "tcp://docker-proxy:2375"
+    networks:
+      - acexy-orchestrator-network
+    depends_on:
+      docker-proxy:
+        condition: service_started
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: docker-proxy
+    privileged: true
+    environment:
+      CONTAINERS: 1
+      POST: 1
+      DELETE: 1
+      NETWORKS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - acexy-orchestrator-network
     restart: unless-stopped
-    # you can expose here the ports if you want to access the acestream service directly
-    # ports:
-    #   - "6878:6878"
-    # environment:
-      # Flags for the AceStream server
-      # EXTRA_FLAGS: "--cache-dir /tmp --cache-limit 2 --cache-auto 1 --log-stderr --log-stderr-level error"
+
+  # Gluetun (opcional, solo necesario con COMPOSE_PROFILE=vpn)
+  # gluetun:
+  #   image: qmcgaw/gluetun
+  #   container_name: gluetun
+  #   cap_add:
+  #     - NET_ADMIN
+  #   environment:
+  #     - VPN_SERVICE_PROVIDER=your_provider
+  #     - VPN_TYPE=openvpn
+  #     # ... resto config VPN
+  #   networks:
+  #     - media-network
+  #   restart: unless-stopped
+
+networks:
+  acexy-orchestrator-network:
+    name: acexy-orchestrator-network
+    driver: bridge
