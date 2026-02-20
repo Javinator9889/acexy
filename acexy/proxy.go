@@ -5,8 +5,8 @@
 package main
 
 import (
-	_ "embed"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,9 +17,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	dockerclient "github.com/docker/docker/client"
 	"github.com/dustin/go-humanize"
 )
 
@@ -42,8 +44,6 @@ var (
 	composeProfile     string
 	acestreamImage     string
 	dockerHost         string
-	stallTimeout           time.Duration
-	stallCheckInterval     time.Duration
 )
 
 //go:embed LICENSE.short
@@ -267,6 +267,57 @@ func (s *Size) Set(value string) error {
 	return nil
 }
 
+// readComposeLabels lee las labels de Docker Compose del contenedor actual
+// leyendo /proc/self/cgroup para obtener el container ID y luego inspeccionándolo.
+// Si no se puede determinar (ej: ejecución fuera de Docker), devuelve strings vacíos.
+func readComposeLabels() (project, workingDir string) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		slog.Debug("Could not read hostname for compose labels", "error", err)
+		return "", ""
+	}
+
+	// El hostname dentro de un contenedor Docker es el container ID (primeros 12 chars)
+	// Intentamos leerlo de /etc/hostname que contiene el ID completo
+	data, err := os.ReadFile("/etc/hostname")
+	if err != nil {
+		slog.Debug("Could not read /etc/hostname", "error", err)
+		// Fallback: usar el hostname directamente
+		data = []byte(hostname)
+	}
+
+	containerID := strings.TrimSpace(string(data))
+	if containerID == "" {
+		return "", ""
+	}
+
+	// Conectar a Docker para inspeccionar el contenedor actual
+	dockerHost := LookupEnvOrString("DOCKER_HOST", "tcp://docker-proxy:2375")
+	cli, err := dockerclient.NewClientWithOpts(
+		dockerclient.WithHost(dockerHost),
+		dockerclient.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		slog.Debug("Could not create docker client to read compose labels", "error", err)
+		return "", ""
+	}
+	defer cli.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	info, err := cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		slog.Debug("Could not inspect own container", "containerID", containerID[:12], "error", err)
+		return "", ""
+	}
+
+	project = info.Config.Labels["com.docker.compose.project"]
+	workingDir = info.Config.Labels["com.docker.compose.project.working_dir"]
+	slog.Debug("Read compose labels", "project", project, "workingDir", workingDir)
+	return project, workingDir
+}
+
 func (s *Size) String() string { return humanize.Bytes(s.Bytes) }
 
 func (s *Size) Get() any { return s.Bytes }
@@ -345,7 +396,7 @@ func parseArgs() {
 	flag.IntVar(
 		&maxReplicas,
 		"max-replicas",
-		LookupEnvOrInt("ACESTREAM_MAX_REPLICAS", 5),
+		LookupEnvOrInt("ACESTREAM_MAX_REPLICAS", 3),
 		"maximum number of AceStream instances allowed. Can be set with ACESTREAM_MAX_REPLICAS environment variable",
 	)
 	flag.IntVar(
@@ -378,20 +429,6 @@ func parseArgs() {
 		LookupEnvOrString("DOCKER_HOST", "tcp://docker-proxy:2375"),
 		"Docker host URL (socket proxy recommended). Can be set with DOCKER_HOST environment variable",
 	)
-	flag.DurationVar(
-		&stallTimeout,
-		"stall-timeout",
-		LookupEnvOrDuration("ACESTREAM_STALL_TIMEOUT", 30*time.Second),
-		"time without receiving stream data after which the stream is considered stalled and closed. "+
-			"Can be set with ACESTREAM_STALL_TIMEOUT environment variable. Set to 0 to disable",
-	)
-	flag.DurationVar(
-		&stallCheckInterval,
-		"stall-check-interval",
-		LookupEnvOrDuration("ACESTREAM_STALL_CHECK_INTERVAL", 10*time.Second),
-		"how often the stall watchdog checks for inactive streams. "+
-			"Can be set with ACESTREAM_STALL_CHECK_INTERVAL environment variable",
-	)
 	flag.Parse()
 }
 
@@ -407,6 +444,10 @@ func main() {
 	} else {
 		endpoint = acexy.MPEG_TS_ENDPOINT
 	}
+	// Leer las labels de Compose del contenedor actual para que las instancias
+	// dinámicas pertenezcan al mismo stack
+	composeProject, composeWorkingDir := readComposeLabels()
+
 	// Inicializar el Orchestrator
 	orch := &orchestrator.Orchestrator{
 		MinReplicas:        minReplicas,
@@ -416,6 +457,8 @@ func main() {
 		Profile:            composeProfile,
 		Image:              acestreamImage,
 		DockerHost:         dockerHost,
+		ComposeProject:     composeProject,
+		ComposeWorkingDir:  composeWorkingDir,
 	}
 	if err := orch.Init(); err != nil {
 		slog.Error("Failed to initialize orchestrator", "error", err)
@@ -425,16 +468,14 @@ func main() {
 
 	// Create a new Acexy instance
 	acexy := &acexy.Acexy{
-		Scheme:            scheme,
-		Host:              host,
-		Port:              port,
-		Endpoint:          endpoint,
-		EmptyTimeout:      emptyTimeout,
-		BufferSize:        int(size.Bytes),
-		NoResponseTimeout: noResponseTimeout,
-		StallTimeout:          stallTimeout,
-		StallCheckInterval:    stallCheckInterval,
-		Orchestrator:      orch,
+		Scheme:             scheme,
+		Host:               host,
+		Port:               port,
+		Endpoint:           endpoint,
+		EmptyTimeout:       emptyTimeout,
+		BufferSize:         int(size.Bytes),
+		NoResponseTimeout:  noResponseTimeout,
+		Orchestrator:       orch,
 	}
 	acexy.Init()
 	slog.Debug("Acexy", "acexy", acexy)

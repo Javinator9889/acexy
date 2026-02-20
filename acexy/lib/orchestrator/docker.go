@@ -40,8 +40,17 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 	hash := randomHex(6)
 	containerName := fmt.Sprintf("acestream-%s", hash)
 
+	// Labels de Compose para que el contenedor pertenezca al stack
+	labels := map[string]string{
+		"com.docker.compose.project":             o.ComposeProject,
+		"com.docker.compose.project.working_dir": o.ComposeWorkingDir,
+		"com.docker.compose.service":             containerName,
+		"com.docker.compose.oneoff":              "False",
+	}
+
 	cfg := &container.Config{
-		Image: o.image,
+		Image:  o.image,
+		Labels: labels,
 	}
 
 	hostCfg := &container.HostConfig{

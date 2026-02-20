@@ -82,8 +82,6 @@ type Acexy struct {
 	EmptyTimeout      time.Duration // Timeout after which, if no data is written, the stream is closed
 	BufferSize        int           // The buffer size to use when copying the data
 	NoResponseTimeout time.Duration // Timeout to wait for a response from the AceStream middleware
-	StallTimeout           time.Duration // Timeout after which a stream with no data is considered stalled
-	StallCheckInterval     time.Duration // How often the watchdog checks for a stalled stream
 	Orchestrator      *orchestrator.Orchestrator // nil si no hay orquestación dinámica
 
 	// Information about ongoing streams
@@ -255,9 +253,7 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 		Source:       resp.Body,
 		EmptyTimeout: a.EmptyTimeout,
 		BufferSize:   a.BufferSize,
-		StallTimeout:       a.StallTimeout,
-		StallCheckInterval: a.StallCheckInterval,
-		StreamID:           string(idType) + ":" + id,
+		StreamID: string(idType) + ":" + id,
 	}
 
 	go func() {

@@ -54,6 +54,8 @@ type Orchestrator struct {
 	Profile            string
 	Image              string
 	DockerHost         string
+	ComposeProject     string // valor de com.docker.compose.project
+	ComposeWorkingDir  string // valor de com.docker.compose.project.working_dir
 }
 
 // Init inicializa el Orchestrator, conecta con Docker y levanta minReplicas instancias
@@ -65,9 +67,12 @@ func (o *Orchestrator) Init() error {
 	o.idleTimeout = o.IdleTimeout
 	o.profile = o.Profile
 	o.image = o.Image
+	// ComposeProject y ComposeWorkingDir se usan directamente desde los campos exportados
 
 	o.instances = make(map[string]*AceStreamInstance)
 	o.mutex = &sync.RWMutex{}
+	// Copiar campos exportados adicionales
+	// (los demás ya se copian abajo)
 
 	// Conectar con Docker vía socket proxy
 	dockerHost := o.DockerHost

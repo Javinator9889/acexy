@@ -212,8 +212,8 @@ experience, but you may need to adjust them to fit your needs.
     <tr>
       <th><code>-empty-timeout</code></th>
       <th><code>ACEXY_EMPTY_TIMEOUT</code></th>
-      <th>Timeout to consider a stream finished once no data is received from the middleware.</th>
-      <th><code>1m</code></th>
+      <th>Time without receiving stream data after which the stream is considered stalled and forcibly closed.</th>
+      <th><code>30s</code></th>
     </tr>
     <tr>
       <th><code>-buffer-size</code></th>
@@ -283,18 +283,6 @@ experience, but you may need to adjust them to fit your needs.
       <th><code>DOCKER_HOST</code></th>
       <th>Docker host URL. Should point to a Docker socket proxy, never mount the socket directly.</th>
       <th><code>tcp://docker-proxy:2375</code></th>
-    </tr>
-    <tr>
-      <th><code>-stall-timeout</code></th>
-      <th><code>ACESTREAM_STALL_TIMEOUT</code></th>
-      <th>Time without receiving stream data after which the stream is considered stalled and forcibly closed. Set to <code>0</code> to disable.</th>
-      <th><code>30s</code></th>
-    </tr>
-    <tr>
-      <th><code>-stall-check-interval</code></th>
-      <th><code>ACESTREAM_STALL_CHECK_INTERVAL</code></th>
-      <th>How often the stall watchdog checks for inactive streams.</th>
-      <th><code>10s</code></th>
     </tr>
   </tbody>
 </table>

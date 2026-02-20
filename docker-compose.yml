@@ -13,18 +13,17 @@ services:
       ACEXY_SCHEME: "http"
       ACEXY_M3U8_STREAM_TIMEOUT: "60s"
       ACEXY_M3U8: "false"
-      ACEXY_EMPTY_TIMEOUT: "60s"
+      ACEXY_EMPTY_TIMEOUT: "20s"
       ACEXY_BUFFER_SIZE: "4MB"
-      ACEXY_NO_RESPONSE_TIMEOUT: "10s"
+      ACEXY_NO_RESPONSE_TIMEOUT: "3s"
       ACEXY_LOG_LEVEL: "INFO"
 
       # Orchestrator config
       ACESTREAM_MIN_REPLICAS: "1"
       ACESTREAM_MAX_REPLICAS: "5"
       ACESTREAM_STREAMS_PER_INSTANCE: "2"
-      ACESTREAM_IDLE_TIMEOUT: "60s"
-      ACESTREAM_STALL_TIMEOUT: "20s"
-      ACESTREAM_IMAGE: "martinbjeldbak/acestream-http-proxy:latest"
+      ACESTREAM_IDLE_TIMEOUT: "10s"
+      ACESTREAM_IMAGE: "wafy80/acestream:latest"
       COMPOSE_PROFILE: "regular"
 
       # Docker socket proxy
