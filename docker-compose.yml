@@ -40,6 +40,7 @@ services:
     privileged: true
     environment:
       CONTAINERS: 1
+      IMAGES: 1
       POST: 1
       DELETE: 1
       NETWORKS: 1

@@ -33,6 +33,7 @@ var (
 	streamTimeout     time.Duration
 	m3u8              bool
 	emptyTimeout      time.Duration
+	emptyRetryCount   int
 	size              Size
 	noResponseTimeout time.Duration
 
@@ -369,9 +370,16 @@ func parseArgs() {
 	flag.DurationVar(
 		&emptyTimeout,
 		"empty-timeout",
-		LookupEnvOrDuration("ACEXY_EMPTY_TIMEOUT", 1*time.Minute),
-		"timeout in human-readable format to finish the stream when the source is empty. "+
+		LookupEnvOrDuration("ACEXY_EMPTY_TIMEOUT", 30*time.Second),
+		"timeout to consider a stream stalled when no data is received. "+
 			"Can be set with ACEXY_EMPTY_TIMEOUT environment variable",
+	)
+	flag.IntVar(
+		&emptyRetryCount,
+		"empty-retry-count",
+		LookupEnvOrInt("ACEXY_EMPTY_RETRY_COUNT", 3),
+		"number of reconnect attempts when a stream stalls before giving up. "+
+			"Set to 0 to disable retries. Can be set with ACEXY_EMPTY_RETRY_COUNT environment variable",
 	)
 	flag.Var(
 		LookupEnvOrSize("ACEXY_BUFFER_SIZE", 4*1024*1024),
@@ -473,6 +481,7 @@ func main() {
 		Port:               port,
 		Endpoint:           endpoint,
 		EmptyTimeout:       emptyTimeout,
+		EmptyRetryCount:    emptyRetryCount,
 		BufferSize:         int(size.Bytes),
 		NoResponseTimeout:  noResponseTimeout,
 		Orchestrator:       orch,

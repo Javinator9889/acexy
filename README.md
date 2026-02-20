@@ -212,8 +212,14 @@ experience, but you may need to adjust them to fit your needs.
     <tr>
       <th><code>-empty-timeout</code></th>
       <th><code>ACEXY_EMPTY_TIMEOUT</code></th>
-      <th>Time without receiving stream data after which the stream is considered stalled and forcibly closed.</th>
+      <th>Time without receiving stream data after which the stream is considered stalled and a reconnect is attempted.</th>
       <th><code>30s</code></th>
+    </tr>
+    <tr>
+      <th><code>-empty-retry-count</code></th>
+      <th><code>ACEXY_EMPTY_RETRY_COUNT</code></th>
+      <th>Number of reconnect attempts when a stream stalls before giving up and closing it. Set to <code>0</code> to disable retries.</th>
+      <th><code>3</code></th>
     </tr>
     <tr>
       <th><code>-buffer-size</code></th>

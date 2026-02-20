@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 )
 
@@ -63,6 +66,10 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 	if o.profile == "vpn" {
 		// En modo VPN usamos la red del contenedor gluetun
 		hostCfg.NetworkMode = container.NetworkMode(fmt.Sprintf("container:%s", vpnContainer))
+	}
+
+	if err := o.pullImageIfNeeded(ctx); err != nil {
+		return "", "", "", fmt.Errorf("failed to pull image: %w", err)
 	}
 
 	slog.Debug("Creating container", "name", containerName, "image", o.image, "profile", o.profile)
@@ -136,4 +143,41 @@ func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string)
 	}
 
 	return "", fmt.Errorf("could not determine IP for container %s", containerID[:12])
+}
+
+// pullImageIfNeeded comprueba si la imagen está disponible localmente y hace pull si no lo está.
+func (o *Orchestrator) pullImageIfNeeded(ctx context.Context) error {
+	images, err := o.dockerClient.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		slog.Debug("Could not list images, attempting pull anyway", "error", err)
+		return o.pullImage()
+	}
+
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if tag == o.image {
+				slog.Debug("Image already present locally", "image", o.image)
+				return nil
+			}
+		}
+	}
+
+	slog.Info("Image not found locally, pulling", "image", o.image)
+	return o.pullImage()
+}
+
+// pullImage hace pull de la imagen con un timeout de 10 minutos.
+func (o *Orchestrator) pullImage() error {
+	pullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	slog.Info("Pulling image", "image", o.image)
+	reader, err := o.dockerClient.ImagePull(pullCtx, o.image, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("image pull failed: %w", err)
+	}
+	defer reader.Close()
+	_, _ = io.Copy(io.Discard, reader)
+	slog.Info("Image pulled successfully", "image", o.image)
+	return nil
 }

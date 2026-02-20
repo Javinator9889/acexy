@@ -80,6 +80,7 @@ type Acexy struct {
 	Port              int           // The port to be used when connecting to the AceStream middleware
 	Endpoint          AcexyEndpoint // The endpoint to be used when connecting to the AceStream middleware
 	EmptyTimeout      time.Duration // Timeout after which, if no data is written, the stream is closed
+	EmptyRetryCount   int           // Number of reconnect attempts when a stream stalls (0 = no retry)
 	BufferSize        int           // The buffer size to use when copying the data
 	NoResponseTimeout time.Duration // Timeout to wait for a response from the AceStream middleware
 	Orchestrator      *orchestrator.Orchestrator // nil si no hay orquestación dinámica
@@ -256,22 +257,47 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 		StreamID: string(idType) + ":" + id,
 	}
 
+	streamCopy := stream
+	retryCount := a.EmptyRetryCount
 	go func() {
-		// Start copying the stream
-		if err := ongoingStream.copier.Copy(); err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				slog.Debug("Connection closed", "stream", stream.ID)
-			} else {
-				slog.Debug("Failed to copy response body", "stream", stream.ID, "error", err)
+		for {
+			err := ongoingStream.copier.Copy()
+			if errors.Is(err, ErrStreamStalled) && retryCount > 0 {
+				retryCount--
+				slog.Warn("Stream stalled, reconnecting",
+					"stream", streamCopy.ID,
+					"attemptsLeft", retryCount,
+				)
+				newResp, reconnErr := a.middleware.Get(streamCopy.PlaybackURL)
+				if reconnErr != nil {
+					slog.Error("Failed to reconnect stalled stream", "stream", streamCopy.ID, "error", reconnErr)
+					break
+				}
+				ongoingStream.copier.Source = newResp.Body
+				a.mutex.Lock()
+				if ongoingStream.player != nil {
+					_ = ongoingStream.player.Body.Close()
+				}
+				ongoingStream.player = newResp
+				a.mutex.Unlock()
+				continue
 			}
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					slog.Debug("Connection closed", "stream", streamCopy.ID)
+				} else {
+					slog.Debug("Failed to copy response body", "stream", streamCopy.ID, "error", err)
+				}
+			}
+			break
 		}
-		slog.Debug("Copy done", "stream", stream.ID)
+		slog.Debug("Copy done", "stream", streamCopy.ID)
 		select {
 		case <-ongoingStream.done:
-			slog.Debug("Stream already closed", "stream", stream.ID)
+			slog.Debug("Stream already closed", "stream", streamCopy.ID)
 		default:
 			close(ongoingStream.done)
-			slog.Debug("Stream closed", "stream", stream.ID)
+			slog.Debug("Stream closed", "stream", streamCopy.ID)
 		}
 	}()
 
