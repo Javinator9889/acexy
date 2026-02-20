@@ -273,6 +273,24 @@ experience, but you may need to adjust them to fit your needs.
       <th><code>5m</code></th>
     </tr>
     <tr>
+      <th><code>-recycle-timeout</code></th>
+      <th><code>ACESTREAM_RECYCLE_TIMEOUT</code></th>
+      <th>Idle time after which the entire pool is replaced with fresh instances. Set to <code>0</code> to disable.</th>
+      <th><code>60s</code></th>
+    </tr>
+    <tr>
+      <th><code>-recycle-check-interval</code></th>
+      <th><code>ACESTREAM_RECYCLE_CHECK_INTERVAL</code></th>
+      <th>How often the recycle check runs. Lower values make the recycle more precise at the cost of slightly more CPU.</th>
+      <th><code>3s</code></th>
+    </tr>
+    <tr>
+      <th><code>-scale-down-interval</code></th>
+      <th><code>ACESTREAM_SCALE_DOWN_INTERVAL</code></th>
+      <th>How often the scale down check runs. This check may call the Docker API, so keep it above a few seconds.</th>
+      <th><code>15s</code></th>
+    </tr>
+    <tr>
       <th><code>-acestream-image</code></th>
       <th><code>ACESTREAM_IMAGE</code></th>
       <th>Docker image to use for AceStream instances.</th>

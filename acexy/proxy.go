@@ -42,6 +42,9 @@ var (
 	maxReplicas               int
 	streamsPerInstance        int
 	idleTimeout               time.Duration
+	recycleTimeout            time.Duration
+	recycleCheckInterval      time.Duration
+	scaleDownInterval         time.Duration
 	composeProfile            string
 	acestreamImage            string
 	dockerHost                string
@@ -421,6 +424,25 @@ func parseArgs() {
 		LookupEnvOrDuration("ACESTREAM_IDLE_TIMEOUT", 300*time.Second),
 		"time after which an idle AceStream instance is removed. Can be set with ACESTREAM_IDLE_TIMEOUT environment variable",
 	)
+	flag.DurationVar(
+		&recycleTimeout,
+		"recycle-timeout",
+		LookupEnvOrDuration("ACESTREAM_RECYCLE_TIMEOUT", 60*time.Second),
+		"idle time after which the entire pool is recycled with fresh instances. "+
+			"Set to 0 to disable. Can be set with ACESTREAM_RECYCLE_TIMEOUT environment variable",
+	)
+	flag.DurationVar(
+		&recycleCheckInterval,
+		"recycle-check-interval",
+		LookupEnvOrDuration("ACESTREAM_RECYCLE_CHECK_INTERVAL", 10*time.Second),
+		"how often the recycle check runs. Can be set with ACESTREAM_RECYCLE_CHECK_INTERVAL environment variable",
+	)
+	flag.DurationVar(
+		&scaleDownInterval,
+		"scale-down-interval",
+		LookupEnvOrDuration("ACESTREAM_SCALE_DOWN_INTERVAL", 15*time.Second),
+		"how often the scale down check runs. Can be set with ACESTREAM_SCALE_DOWN_INTERVAL environment variable",
+	)
 	flag.StringVar(
 		&composeProfile,
 		"compose-profile",
@@ -478,6 +500,9 @@ func main() {
 		MaxReplicas:               maxReplicas,
 		StreamsPerInstance:        streamsPerInstance,
 		IdleTimeout:               idleTimeout,
+		RecycleTimeout:            recycleTimeout,
+		RecycleCheckInterval:      recycleCheckInterval,
+		ScaleDownInterval:         scaleDownInterval,
 		Profile:                   composeProfile,
 		Image:                     acestreamImage,
 		DockerHost:                dockerHost,
@@ -495,15 +520,15 @@ func main() {
 
 	// Create a new Acexy instance
 	acexy := &acexy.Acexy{
-		Scheme:             scheme,
-		Host:               host,
-		Port:               port,
-		Endpoint:           endpoint,
-		EmptyTimeout:       emptyTimeout,
-		EmptyRetryCount:    emptyRetryCount,
-		BufferSize:         int(size.Bytes),
-		NoResponseTimeout:  noResponseTimeout,
-		Orchestrator:       orch,
+		Scheme:            scheme,
+		Host:              host,
+		Port:              port,
+		Endpoint:          endpoint,
+		EmptyTimeout:      emptyTimeout,
+		EmptyRetryCount:   emptyRetryCount,
+		BufferSize:        int(size.Bytes),
+		NoResponseTimeout: noResponseTimeout,
+		Orchestrator:      orch,
 	}
 	acexy.Init()
 	slog.Debug("Acexy", "acexy", acexy)

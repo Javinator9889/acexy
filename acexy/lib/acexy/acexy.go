@@ -141,7 +141,14 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 	if a.Orchestrator != nil {
 		instance = a.Orchestrator.SelectInstance()
 		if instance == nil {
-			if a.Orchestrator.TotalInstances() < a.Orchestrator.MaxReplicas {
+			if a.Orchestrator.IsRecycling() {
+				// Pool is being recycled — wait for a fresh instance instead of creating a new one
+				slog.Info("Pool is recycling, waiting for a healthy instance")
+				instance = a.Orchestrator.WaitForInstance(2 * time.Minute)
+				if instance == nil {
+					return nil, errors.New("timed out waiting for instance after pool recycle")
+				}
+			} else if a.Orchestrator.TotalInstances() < a.Orchestrator.MaxReplicas {
 				instance, err = a.Orchestrator.ScaleUp()
 				if err != nil {
 					slog.Error("Failed to scale up", "error", err)
@@ -155,6 +162,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		// if two streams arrive simultaneously, the second will already see ActiveStreams=1
 		instance.ActiveStreams++
 		instance.LastActivity = time.Now()
+		a.Orchestrator.TouchPoolActivity()
 		slog.Debug("Instance stream count", "instance", instance.Name,
 			"activeStreams", instance.ActiveStreams)
 

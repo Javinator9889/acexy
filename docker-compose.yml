@@ -23,6 +23,7 @@ services:
       ACESTREAM_MAX_REPLICAS: "5"
       ACESTREAM_STREAMS_PER_INSTANCE: "2"
       ACESTREAM_IDLE_TIMEOUT: "10s"
+      ACESTREAM_RECYCLE_TIMEOUT: "15s"
       ACESTREAM_IMAGE: "wafy80/acestream:latest"
       COMPOSE_PROFILE: "regular"
 

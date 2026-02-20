@@ -44,14 +44,21 @@ type Orchestrator struct {
 	maxReplicas        int
 	streamsPerInstance int
 	idleTimeout        time.Duration
-	profile            string // "regular" or "vpn"
-	image              string // Docker image to use
+	profile              string    // "regular" or "vpn"
+	image                string    // Docker image to use
+	lastPoolActivity     time.Time // last time any stream was active across the whole pool
+	recycling            bool      // true while a recycle is in progress, prevents concurrent recycles
+	recycleCheckInterval time.Duration // how often recycleIfIdle is checked
+	scaleDownInterval    time.Duration // how often scaleDownIdle is checked
 
 	// Exported for access from acexy.go
 	MinReplicas               int
 	MaxReplicas               int
 	StreamsPerInstance        int
 	IdleTimeout               time.Duration
+	RecycleTimeout            time.Duration // idle time before recycling the entire pool
+	RecycleCheckInterval      time.Duration // how often the recycle check runs (default 3s)
+	ScaleDownInterval         time.Duration // how often the scale down check runs (default 30s)
 	Profile                   string
 	Image                     string
 	DockerHost                string
@@ -70,6 +77,17 @@ func (o *Orchestrator) Init() error {
 	o.idleTimeout = o.IdleTimeout
 	o.profile = o.Profile
 	o.image = o.Image
+
+	o.lastPoolActivity = time.Now()
+
+	o.recycleCheckInterval = o.RecycleCheckInterval
+	if o.recycleCheckInterval <= 0 {
+		o.recycleCheckInterval = 3 * time.Second
+	}
+	o.scaleDownInterval = o.ScaleDownInterval
+	if o.scaleDownInterval <= 0 {
+		o.scaleDownInterval = 30 * time.Second
+	}
 
 	// Apply defaults for thresholds if not configured
 	if o.ContainerFailureThreshold <= 0 {
@@ -107,13 +125,20 @@ func (o *Orchestrator) Init() error {
 	slog.Info("Orchestrator initialized", "minReplicas", o.minReplicas, "maxReplicas", o.maxReplicas,
 		"streamsPerInstance", o.streamsPerInstance, "profile", o.profile, "image", o.image)
 
-	// Levantar instancias iniciales
+	// Start initial instances
 	for i := 0; i < o.minReplicas; i++ {
 		slog.Info("Scaling up initial instance", "index", i+1, "of", o.minReplicas)
 		if _, err := o.ScaleUp(); err != nil {
 			return fmt.Errorf("failed to scale up initial instance %d: %w", i+1, err)
 		}
 	}
+
+	// Reset lastPoolActivity after all initial instances are ready so the recycle
+	// timeout starts counting from when the pool is actually available, not from
+	// when Init() was called.
+	o.mutex.Lock()
+	o.lastPoolActivity = time.Now()
+	o.mutex.Unlock()
 
 	return nil
 }
@@ -123,6 +148,26 @@ func (o *Orchestrator) TotalInstances() int {
 	o.mutex.RLock()
 	defer o.mutex.RUnlock()
 	return len(o.instances)
+}
+
+// IsRecycling returns true if a pool recycle is currently in progress.
+func (o *Orchestrator) IsRecycling() bool {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	return o.recycling
+}
+
+// WaitForInstance blocks until a healthy instance is available or the timeout expires.
+// Used to avoid creating spurious instances during a pool recycle.
+func (o *Orchestrator) WaitForInstance(timeout time.Duration) *AceStreamInstance {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if instance := o.SelectInstance(); instance != nil {
+			return instance
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
 }
 
 // SelectInstance picks the best available instance:
@@ -223,36 +268,142 @@ func (o *Orchestrator) removeContainer(ctx context.Context, containerID string) 
 	return o.dockerClient.ContainerRemove(ctx, containerID, containerRemoveOptions())
 }
 
-// ScaleDownLoop periodically checks for idle instances and removes them when appropriate.
+// TouchPoolActivity updates the last activity timestamp of the pool.
+// Must be called from acexy.go whenever a new stream is assigned to any instance.
+func (o *Orchestrator) TouchPoolActivity() {
+	o.mutex.Lock()
+	o.lastPoolActivity = time.Now()
+	o.mutex.Unlock()
+}
+
+// totalActiveStreams returns the sum of active streams across all instances.
+// The caller must hold at least a read lock.
+func (o *Orchestrator) totalActiveStreams() int {
+	total := 0
+	for _, inst := range o.instances {
+		total += inst.ActiveStreams
+	}
+	return total
+}
+
+// ScaleDownLoop periodically checks for idle instances and recycles the pool when appropriate.
+// Two independent tickers are used:
+//   - Every 3s: recycle check (in-memory only, cheap)
+//   - Every 30s: scale down check (may call Docker API to remove containers)
+//
 // It must be run in a separate goroutine.
 func (o *Orchestrator) ScaleDownLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	recycleTicker := time.NewTicker(o.recycleCheckInterval)
+	scaleDownTicker := time.NewTicker(o.scaleDownInterval)
+	defer recycleTicker.Stop()
+	defer scaleDownTicker.Stop()
 
-	for range ticker.C {
-		o.mutex.Lock()
-		for id, instance := range o.instances {
-			if instance.ActiveStreams > 0 {
-				continue
-			}
-			if time.Since(instance.LastActivity) <= o.idleTimeout {
-				continue
-			}
-			if len(o.instances) <= o.minReplicas {
-				break
-			}
-			slog.Info("Scaling down idle instance", "name", instance.Name,
-				"idleSince", instance.LastActivity)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := o.dockerClient.ContainerRemove(ctx, id, containerRemoveOptions()); err != nil {
-				slog.Warn("Failed to remove idle instance", "containerID", id[:12], "error", err)
-			} else {
-				delete(o.instances, id)
-			}
-			cancel()
+	for {
+		select {
+		case <-recycleTicker.C:
+			o.recycleIfIdle()
+		case <-scaleDownTicker.C:
+			o.scaleDownIdle()
 		}
-		o.mutex.Unlock()
 	}
+}
+
+// scaleDownIdle removes instances that have been idle longer than IdleTimeout,
+// as long as the pool stays above minReplicas.
+func (o *Orchestrator) scaleDownIdle() {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+
+	for id, instance := range o.instances {
+		if instance.ActiveStreams > 0 {
+			continue
+		}
+		if time.Since(instance.LastActivity) <= o.idleTimeout {
+			continue
+		}
+		if len(o.instances) <= o.minReplicas {
+			break
+		}
+		slog.Info("Scaling down idle instance", "name", instance.Name,
+			"idleSince", instance.LastActivity)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := o.dockerClient.ContainerRemove(ctx, id, containerRemoveOptions()); err != nil {
+			slog.Warn("Failed to remove idle instance", "containerID", id[:12], "error", err)
+		} else {
+			delete(o.instances, id)
+		}
+		cancel()
+	}
+}
+
+// recycleIfIdle replaces the entire pool with fresh instances when the pool has had
+// no active streams for longer than RecycleTimeout. This prevents AceStream state
+// (cache, stale connections) from accumulating over time.
+// A recycling flag prevents concurrent recycles while ScaleUp is still running.
+func (o *Orchestrator) recycleIfIdle() {
+	if o.RecycleTimeout <= 0 {
+		return
+	}
+
+	o.mutex.RLock()
+	activeStreams := o.totalActiveStreams()
+	idleSince := o.lastPoolActivity
+	alreadyRecycling := o.recycling
+	o.mutex.RUnlock()
+
+	if alreadyRecycling {
+		return
+	}
+	if activeStreams > 0 {
+		return
+	}
+	if time.Since(idleSince) <= o.RecycleTimeout {
+		return
+	}
+
+	slog.Info("Pool idle, recycling all instances",
+		"idleSince", idleSince,
+		"recycleTimeout", o.RecycleTimeout,
+	)
+
+	// Mark recycling in progress to prevent concurrent recycles
+	o.mutex.Lock()
+	o.recycling = true
+	o.mutex.Unlock()
+	defer func() {
+		o.mutex.Lock()
+		o.recycling = false
+		o.mutex.Unlock()
+	}()
+
+	// Remove all current instances
+	o.mutex.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for id, inst := range o.instances {
+		slog.Info("Recycling instance", "name", inst.Name)
+		if err := o.dockerClient.ContainerRemove(ctx, id, containerRemoveOptions()); err != nil {
+			slog.Warn("Failed to remove instance during recycle", "name", inst.Name, "error", err)
+		}
+		delete(o.instances, id)
+	}
+	// Reset lastPoolActivity before unlocking so that the recycle check does not
+	// fire again immediately while ScaleUp is still running.
+	o.lastPoolActivity = time.Now()
+	o.mutex.Unlock()
+
+	// Start fresh minReplicas instances
+	for i := 0; i < o.minReplicas; i++ {
+		if _, err := o.ScaleUp(); err != nil {
+			slog.Error("Failed to start replacement instance after recycle", "index", i+1, "error", err)
+		}
+	}
+
+	// Update lastPoolActivity again after all instances are up so the full
+	// startup time does not count towards the next recycle timeout.
+	o.mutex.Lock()
+	o.lastPoolActivity = time.Now()
+	o.mutex.Unlock()
 }
 
 // Shutdown removes all containers in the pool in an orderly fashion.
