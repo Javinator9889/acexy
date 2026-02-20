@@ -270,7 +270,7 @@ func (s *Size) Set(value string) error {
 	return nil
 }
 
-// readComposeLabels lee las labels de Docker Compose del contenedor actual
+// readComposeLabels reads the Docker Compose labels of the current container
 // by reading /proc/self/cgroup to obtain the container ID and then inspecting it.
 // If it cannot be determined (e.g. running outside Docker), it returns empty strings.
 func readComposeLabels() (project, workingDir string) {
@@ -280,12 +280,12 @@ func readComposeLabels() (project, workingDir string) {
 		return "", ""
 	}
 
-	// El hostname dentro de un contenedor Docker es el container ID (primeros 12 chars)
-	// Intentamos leerlo de /etc/hostname que contiene el ID completo
+	// The hostname inside a Docker container is the container ID (first 12 chars).
+	// We try to read it from /etc/hostname which contains the full ID.
 	data, err := os.ReadFile("/etc/hostname")
 	if err != nil {
 		slog.Debug("Could not read /etc/hostname", "error", err)
-		// Fallback: usar el hostname directamente
+		// Fallback: use the hostname directly
 		data = []byte(hostname)
 	}
 
@@ -294,7 +294,7 @@ func readComposeLabels() (project, workingDir string) {
 		return "", ""
 	}
 
-	// Conectar a Docker para inspeccionar el contenedor actual
+	// Connect to Docker to inspect the current container
 	dockerHost := LookupEnvOrString("DOCKER_HOST", "tcp://docker-proxy:2375")
 	cli, err := dockerclient.NewClientWithOpts(
 		dockerclient.WithHost(dockerHost),
@@ -468,11 +468,11 @@ func main() {
 	} else {
 		endpoint = acexy.MPEG_TS_ENDPOINT
 	}
-	// Leer las labels de Compose del contenedor actual para que las instancias
-	// so that dynamic instances belong to the same Compose stack
+	// Read the Compose labels of the current container so that dynamic instances
+	// belong to the same Compose stack
 	composeProject, composeWorkingDir := readComposeLabels()
 
-	// Inicializar el Orchestrator
+	// Initialize the Orchestrator
 	orch := &orchestrator.Orchestrator{
 		MinReplicas:               minReplicas,
 		MaxReplicas:               maxReplicas,

@@ -128,7 +128,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	// Check if the stream is already enqueued — no tocar instancias, el PMultiWriter ya distribuye
+	// Check if the stream is already enqueued — instances are untouched, the PMultiWriter handles distribution
 	if stream, ok := a.streams[aceId]; ok {
 		return stream.stream, nil
 	}
@@ -160,7 +160,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 
 		middlewareResp, err = GetStreamFromInstance(instance, a, aceId, extraParams)
 		if err != nil {
-			// Revertir si el request falla
+			// Revert if the request fails
 			instance.ActiveStreams--
 		}
 	} else {
@@ -209,7 +209,7 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 	// Register the new client
 	ongoingStream.clients++
 
-	// Calcular total de clientes en todos los streams
+	// Calculate total clients across all streams
 	var totalClients uint
 	for _, s := range a.streams {
 		totalClients += s.clients
@@ -337,8 +337,8 @@ func (a *Acexy) handleStall(os *ongoingStream, stream *AceStream) error {
 	return a.reconnectStream(os, stream)
 }
 
-// migrateStream mueve un stream desde una instancia enferma a una sana.
-// Decrementa ActiveStreams en la instancia vieja e incrementa en la nueva.
+// migrateStream moves a stream from an unhealthy instance to a healthy one.
+// Decrements ActiveStreams on the old instance and increments it on the new one.
 func (a *Acexy) migrateStream(os *ongoingStream, stream *AceStream) error {
 	slog.Warn("Instance unhealthy, migrating stream",
 		"stream", stream.ID,
@@ -380,7 +380,7 @@ func (a *Acexy) reconnectStream(os *ongoingStream, stream *AceStream) error {
 	return nil
 }
 
-// getOrCreateHealthyInstance selecciona una instancia sana del pool o crea una nueva si no hay ninguna disponible.
+// getOrCreateHealthyInstance selects a healthy instance from the pool or creates a new one if none is available.
 func (a *Acexy) getOrCreateHealthyInstance() (*orchestrator.AceStreamInstance, error) {
 	instance := a.Orchestrator.SelectInstance()
 	if instance != nil {
@@ -392,7 +392,7 @@ func (a *Acexy) getOrCreateHealthyInstance() (*orchestrator.AceStreamInstance, e
 	return nil, errors.New("max replicas reached, no healthy instance available")
 }
 
-// closeStreamDone cierra el canal done del stream si no estaba ya cerrado.
+// closeStreamDone closes the stream's done channel if it has not been closed already.
 func (a *Acexy) closeStreamDone(os *ongoingStream, id AceID) {
 	if os.instance != nil {
 		slog.Debug("Copy done", "stream", id, "instance", os.instance.Name)

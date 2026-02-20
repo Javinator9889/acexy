@@ -20,22 +20,22 @@ const (
 	Dead
 )
 
-// AceStreamInstance representa una instancia de contenedor AceStream en el pool
+// AceStreamInstance represents an AceStream container instance in the pool.
 type AceStreamInstance struct {
 	ContainerID        string
-	Name               string // nombre del contenedor, ej: acestream-2968d06067f1
+	Name               string // container name, e.g. acestream-2968d06067f1
 	Host               string
 	Port               int
 	Health             HealthStatus
 	LastCheck          time.Time
-	FailureCount       int  // fallos consecutivos del health check del contenedor
-	StreamFailureCount int  // veces consecutivas que todos los streams activos estaban colgados
+	FailureCount       int  // consecutive container health check failures
+	StreamFailureCount int  // consecutive times all active streams were stalled simultaneously
 	ActiveStreams       int
 	CreatedAt          time.Time
 	LastActivity       time.Time
 }
 
-// Orchestrator gestiona el pool de instancias AceStream
+// Orchestrator manages the pool of AceStream instances.
 type Orchestrator struct {
 	instances          map[string]*AceStreamInstance
 	mutex              *sync.RWMutex
@@ -44,10 +44,10 @@ type Orchestrator struct {
 	maxReplicas        int
 	streamsPerInstance int
 	idleTimeout        time.Duration
-	profile            string // "regular" o "vpn"
-	image              string // imagen Docker a usar
+	profile            string // "regular" or "vpn"
+	image              string // Docker image to use
 
-	// Exportados para acceso desde acexy.go
+	// Exported for access from acexy.go
 	MinReplicas               int
 	MaxReplicas               int
 	StreamsPerInstance        int
@@ -55,15 +55,15 @@ type Orchestrator struct {
 	Profile                   string
 	Image                     string
 	DockerHost                string
-	ComposeProject            string // valor de com.docker.compose.project
-	ComposeWorkingDir         string // valor de com.docker.compose.project.working_dir
-	ContainerFailureThreshold int    // fallos consecutivos del health check antes de marcar Unhealthy
-	StreamFailureThreshold    int    // veces que todos los streams fallan antes de marcar Unhealthy
+	ComposeProject            string // value of com.docker.compose.project
+	ComposeWorkingDir         string // value of com.docker.compose.project.working_dir
+	ContainerFailureThreshold int    // consecutive health check failures before marking Unhealthy
+	StreamFailureThreshold    int    // consecutive times all streams stall before marking Unhealthy
 }
 
-// Init inicializa el Orchestrator, conecta con Docker y levanta minReplicas instancias
+// Init initializes the Orchestrator, connects to Docker and starts minReplicas instances.
 func (o *Orchestrator) Init() error {
-	// Copiar campos exportados a los internos
+	// Copy exported fields to internal ones
 	o.minReplicas = o.MinReplicas
 	o.maxReplicas = o.MaxReplicas
 	o.streamsPerInstance = o.StreamsPerInstance
@@ -71,7 +71,7 @@ func (o *Orchestrator) Init() error {
 	o.profile = o.Profile
 	o.image = o.Image
 
-	// Defaults para umbrales si no se han configurado
+	// Apply defaults for thresholds if not configured
 	if o.ContainerFailureThreshold <= 0 {
 		o.ContainerFailureThreshold = 3
 	}
@@ -97,7 +97,7 @@ func (o *Orchestrator) Init() error {
 		return fmt.Errorf("failed to create docker client: %w", err)
 	}
 
-	// Verificar conectividad con Docker
+	// Verify Docker connectivity
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := o.dockerClient.Ping(ctx); err != nil {
@@ -125,11 +125,11 @@ func (o *Orchestrator) TotalInstances() int {
 	return len(o.instances)
 }
 
-// SelectInstance elige la mejor instancia disponible:
+// SelectInstance picks the best available instance:
 // - Health == Healthy
 // - ActiveStreams < streamsPerInstance
-// - Prefiere la instancia con menos streams activos
-// Devuelve nil si no hay ninguna disponible
+// - Prefers the instance with the fewest active streams
+// Returns nil if no instance is available.
 func (o *Orchestrator) SelectInstance() *AceStreamInstance {
 	o.mutex.RLock()
 	defer o.mutex.RUnlock()
@@ -176,7 +176,7 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 
 	slog.Info("Waiting for instance to be healthy", "name", containerName, "host", host, "port", aceStreamPort)
 	if err := o.waitForHealthy(instance); err != nil {
-		// Si no arranca limpiamos el contenedor
+		// If it never starts, clean up the container
 		_ = o.removeContainer(ctx, containerID)
 		return nil, fmt.Errorf("instance never became healthy: %w", err)
 	}
@@ -192,8 +192,8 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 	return instance, nil
 }
 
-// waitForHealthy hace polling a /webui/api/service?method=get_version
-// hasta que responde 200 o se agota el timeout (2 minutos, polling cada 5s)
+// waitForHealthy polls /webui/api/service?method=get_version
+// until it returns 200 or the timeout expires (2 minutes, polling every 5s).
 func (o *Orchestrator) waitForHealthy(instance *AceStreamInstance) error {
 	timeout := 2 * time.Minute
 	interval := 5 * time.Second
@@ -218,7 +218,7 @@ func (o *Orchestrator) waitForHealthy(instance *AceStreamInstance) error {
 	return fmt.Errorf("timeout waiting for instance %s to become healthy", instance.ContainerID)
 }
 
-// removeContainer elimina un contenedor (usado en cleanup tras error)
+// removeContainer removes a container (used for cleanup after an error).
 func (o *Orchestrator) removeContainer(ctx context.Context, containerID string) error {
 	return o.dockerClient.ContainerRemove(ctx, containerID, containerRemoveOptions())
 }
@@ -255,7 +255,7 @@ func (o *Orchestrator) ScaleDownLoop() {
 	}
 }
 
-// Shutdown elimina todos los contenedores del pool de forma ordenada
+// Shutdown removes all containers in the pool in an orderly fashion.
 func (o *Orchestrator) Shutdown() {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()

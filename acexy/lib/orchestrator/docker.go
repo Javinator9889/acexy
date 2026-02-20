@@ -15,7 +15,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 )
 
-// randomHex genera un string hexadecimal aleatorio de n bytes
+// randomHex generates a random hexadecimal string of n bytes.
 func randomHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
@@ -43,7 +43,7 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 	hash := randomHex(6)
 	containerName := fmt.Sprintf("acestream-%s", hash)
 
-	// Labels de Compose para que el contenedor pertenezca al stack
+	// Compose labels so the container belongs to the same stack
 	labels := map[string]string{
 		"com.docker.compose.project":             o.ComposeProject,
 		"com.docker.compose.project.working_dir": o.ComposeWorkingDir,
@@ -64,7 +64,7 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 	netCfg := &network.NetworkingConfig{}
 
 	if o.profile == "vpn" {
-		// En modo VPN usamos la red del contenedor gluetun
+		// In VPN mode, share the network namespace of the gluetun container
 		hostCfg.NetworkMode = container.NetworkMode(fmt.Sprintf("container:%s", vpnContainer))
 	}
 
@@ -93,7 +93,7 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 		slog.Debug("Container connected to network", "network", regularNetwork, "containerID", resp.ID[:12])
 	}
 
-	// Obtener la IP del contenedor en la red correcta
+	// Get the container's IP on the correct network
 	host, err := o.getContainerHost(ctx, resp.ID)
 	if err != nil {
 		_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
@@ -104,7 +104,7 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 	return resp.ID, containerName, host, nil
 }
 
-// containerExists verifica si un contenedor con ese ID existe en Docker
+// containerExists checks whether a container with the given ID exists in Docker.
 func (o *Orchestrator) containerExists(ctx context.Context, containerID string) bool {
 	f := filters.NewArgs()
 	f.Add("id", containerID)
@@ -118,9 +118,9 @@ func (o *Orchestrator) containerExists(ctx context.Context, containerID string) 
 	return len(containers) > 0
 }
 
-// getContainerHost obtiene el host al que conectarse para acceder al contenedor.
-// En modo VPN devuelve "localhost" (comparte red con gluetun).
-// En modo regular devuelve la IP del contenedor en acexy-orchestrator-network.
+// getContainerHost returns the host to connect to in order to reach the container.
+// In VPN mode it returns "localhost" (shared network with gluetun).
+// In regular mode it returns the container IP on acexy-orchestrator-network.
 func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string) (string, error) {
 	if o.profile == "vpn" {
 		return "localhost", nil
@@ -137,7 +137,7 @@ func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string)
 		}
 	}
 
-	// Fallback: usar la IP de bridge por defecto
+	// Fallback: use the default bridge IP
 	if inspect.NetworkSettings.IPAddress != "" {
 		return inspect.NetworkSettings.IPAddress, nil
 	}
@@ -166,7 +166,7 @@ func (o *Orchestrator) pullImageIfNeeded(ctx context.Context) error {
 	return o.pullImage()
 }
 
-// pullImage hace pull de la imagen con un timeout de 10 minutos.
+// pullImage pulls the image with a 10-minute timeout.
 func (o *Orchestrator) pullImage() error {
 	pullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

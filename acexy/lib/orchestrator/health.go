@@ -146,8 +146,8 @@ func (o *Orchestrator) ResetStreamFailures(inst *AceStreamInstance) {
 	}
 }
 
-// killAndReplace elimina una instancia enferma del pool y crea una nueva si es necesario
-// para mantener minReplicas.
+// killAndReplace removes an unhealthy instance from the pool and creates a replacement
+// if needed to maintain minReplicas.
 func (o *Orchestrator) killAndReplace(inst *AceStreamInstance) {
 	o.mutex.Lock()
 	delete(o.instances, inst.ContainerID)
