@@ -254,60 +254,150 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 		Source:       resp.Body,
 		EmptyTimeout: a.EmptyTimeout,
 		BufferSize:   a.BufferSize,
-		StreamID: string(idType) + ":" + id,
+		StreamID:     string(idType) + ":" + id,
 	}
 
-	streamCopy := stream
-	retryCount := a.EmptyRetryCount
-	go func() {
-		for {
-			err := ongoingStream.copier.Copy()
-			if errors.Is(err, ErrStreamStalled) && retryCount > 0 {
-				retryCount--
-				slog.Warn("Stream stalled, reconnecting",
-					"stream", streamCopy.ID,
-					"attemptsLeft", retryCount,
-				)
-				newResp, reconnErr := a.middleware.Get(streamCopy.PlaybackURL)
-				if reconnErr != nil {
-					slog.Error("Failed to reconnect stalled stream", "stream", streamCopy.ID, "error", reconnErr)
-					break
-				}
-				ongoingStream.copier.Source = newResp.Body
-				a.mutex.Lock()
-				if ongoingStream.player != nil {
-					_ = ongoingStream.player.Body.Close()
-				}
-				ongoingStream.player = newResp
-				a.mutex.Unlock()
-				continue
-			}
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					slog.Debug("Connection closed", "stream", streamCopy.ID)
-				} else {
-					slog.Debug("Failed to copy response body", "stream", streamCopy.ID, "error", err)
-				}
-			}
-			break
-		}
-		slog.Debug("Copy done", "stream", streamCopy.ID)
-		select {
-		case <-ongoingStream.done:
-			slog.Debug("Stream already closed", "stream", streamCopy.ID)
-		default:
-			close(ongoingStream.done)
-			slog.Debug("Stream closed", "stream", streamCopy.ID)
-		}
-	}()
+	go a.runStreamLoop(ongoingStream, stream)
 
 	ongoingStream.player = resp
 	return nil
 }
 
+// runStreamLoop gestiona el ciclo de vida de la copia de un stream.
+// Es la única goroutine responsable de: ejecutar el Copier, manejar stalls,
+// reintentar y cerrar el canal done cuando el stream termina.
+func (a *Acexy) runStreamLoop(os *ongoingStream, stream *AceStream) {
+	retries := a.EmptyRetryCount
+	for {
+		err := os.copier.Copy()
+
+		if !errors.Is(err, ErrStreamStalled) {
+			a.logCopyError(err, stream.ID)
+			break
+		}
+
+		if retries == 0 {
+			slog.Warn("Stream stalled, no retries left", "stream", stream.ID)
+			break
+		}
+		retries--
+
+		a.notifyStall(os, stream.ID, retries)
+		if err := a.handleStall(os, stream); err != nil {
+			slog.Error("Failed to recover stalled stream", "stream", stream.ID, "error", err)
+			break
+		}
+		a.notifyRecovered(os)
+	}
+
+	a.closeStreamDone(os, stream.ID)
+}
+
+// logCopyError loguea el error de copia según su tipo.
+// Los errores de conexión cerrada son debug; el resto son debug también salvo nil (fin normal).
+func (a *Acexy) logCopyError(err error, id AceID) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, net.ErrClosed) {
+		slog.Debug("Connection closed", "stream", id)
+	} else {
+		slog.Debug("Failed to copy response body", "stream", id, "error", err)
+	}
+}
+
+// notifyStall notifica al orquestador que el stream se ha colgado y loguea el intento de reconexión.
+// Solo notifica si hay orquestador activo, diferenciando stalls de IDs inválidos (ver MarkStreamStalled).
+func (a *Acexy) notifyStall(os *ongoingStream, id AceID, attemptsLeft int) {
+	if a.Orchestrator != nil && os.instance != nil {
+		a.Orchestrator.MarkStreamStalled(os.instance)
+	}
+	slog.Warn("Stream stalled, reconnecting", "stream", id, "attemptsLeft", attemptsLeft)
+}
+
+// notifyRecovered notifica al orquestador que el stream se ha reconectado con éxito.
+func (a *Acexy) notifyRecovered(os *ongoingStream) {
+	if a.Orchestrator != nil && os.instance != nil {
+		a.Orchestrator.ResetStreamFailures(os.instance)
+	}
+}
+
+// handleStall decide cómo recuperar un stream colgado:
+// si la instancia está Unhealthy, migra a una sana; si no, reconecta en la misma.
+func (a *Acexy) handleStall(os *ongoingStream, stream *AceStream) error {
+	if a.Orchestrator != nil && os.instance != nil && os.instance.Health == orchestrator.Unhealthy {
+		return a.migrateStream(os, stream)
+	}
+	return a.reconnectStream(os, stream)
+}
+
+// migrateStream mueve un stream desde una instancia enferma a una sana.
+// Decrementa ActiveStreams en la instancia vieja e incrementa en la nueva.
+func (a *Acexy) migrateStream(os *ongoingStream, stream *AceStream) error {
+	slog.Warn("Instance unhealthy, migrating stream",
+		"stream", stream.ID,
+		"oldInstance", os.instance.Name,
+	)
+	newInstance, err := a.getOrCreateHealthyInstance()
+	if err != nil {
+		return fmt.Errorf("no healthy instance available for migration: %w", err)
+	}
+
+	if os.instance.ActiveStreams > 0 {
+		os.instance.ActiveStreams--
+	}
+	newInstance.ActiveStreams++
+	newInstance.LastActivity = time.Now()
+	os.instance = newInstance
+
+	slog.Info("Stream migrated", "stream", stream.ID, "newInstance", newInstance.Name)
+	return a.reconnectStream(os, stream)
+}
+
+// reconnectStream abre una nueva conexión al PlaybackURL y actualiza el Copier y el player.
+func (a *Acexy) reconnectStream(os *ongoingStream, stream *AceStream) error {
+	newResp, err := a.middleware.Get(stream.PlaybackURL)
+	if err != nil {
+		return err
+	}
+
+	os.copier.Source = newResp.Body
+	a.mutex.Lock()
+	if os.player != nil {
+		_ = os.player.Body.Close()
+	}
+	os.player = newResp
+	a.mutex.Unlock()
+	return nil
+}
+
+// getOrCreateHealthyInstance selecciona una instancia sana del pool o crea una nueva si no hay ninguna disponible.
+func (a *Acexy) getOrCreateHealthyInstance() (*orchestrator.AceStreamInstance, error) {
+	instance := a.Orchestrator.SelectInstance()
+	if instance != nil {
+		return instance, nil
+	}
+	if a.Orchestrator.TotalInstances() < a.Orchestrator.MaxReplicas {
+		return a.Orchestrator.ScaleUp()
+	}
+	return nil, errors.New("max replicas reached, no healthy instance available")
+}
+
+// closeStreamDone cierra el canal done del stream si no estaba ya cerrado.
+func (a *Acexy) closeStreamDone(os *ongoingStream, id AceID) {
+	slog.Debug("Copy done", "stream", id)
+	select {
+	case <-os.done:
+		slog.Debug("Stream already closed", "stream", id)
+	default:
+		close(os.done)
+		slog.Debug("Stream closed", "stream", id)
+	}
+}
+
 // Releases a stream that is no longer being used. The stream is removed from the AceStream backend.
 // If the stream is not enqueued, an error is returned. If the stream has clients reproducing it,
-// the stream is not removed. The stream is identified by the “id“ identifier.
+// the stream is not removed. The stream is identified by the "id" identifier.
 //
 // Note: The global mutex is locked and unlocked by the caller.
 func (a *Acexy) releaseStream(stream *AceStream) error {

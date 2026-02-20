@@ -38,13 +38,15 @@ var (
 	noResponseTimeout time.Duration
 
 	// Orchestrator config
-	minReplicas        int
-	maxReplicas        int
-	streamsPerInstance int
-	idleTimeout        time.Duration
-	composeProfile     string
-	acestreamImage     string
-	dockerHost         string
+	minReplicas               int
+	maxReplicas               int
+	streamsPerInstance        int
+	idleTimeout               time.Duration
+	composeProfile            string
+	acestreamImage            string
+	dockerHost                string
+	containerFailureThreshold int
+	streamFailureThreshold    int
 )
 
 //go:embed LICENSE.short
@@ -437,6 +439,20 @@ func parseArgs() {
 		LookupEnvOrString("DOCKER_HOST", "tcp://docker-proxy:2375"),
 		"Docker host URL (socket proxy recommended). Can be set with DOCKER_HOST environment variable",
 	)
+	flag.IntVar(
+		&containerFailureThreshold,
+		"container-failure-threshold",
+		LookupEnvOrInt("ACESTREAM_CONTAINER_FAILURE_THRESHOLD", 3),
+		"consecutive container health check failures before marking instance unhealthy. "+
+			"Can be set with ACESTREAM_CONTAINER_FAILURE_THRESHOLD environment variable",
+	)
+	flag.IntVar(
+		&streamFailureThreshold,
+		"stream-failure-threshold",
+		LookupEnvOrInt("ACESTREAM_STREAM_FAILURE_THRESHOLD", 3),
+		"consecutive times all streams in an instance stall before marking it unhealthy. "+
+			"Can be set with ACESTREAM_STREAM_FAILURE_THRESHOLD environment variable",
+	)
 	flag.Parse()
 }
 
@@ -458,21 +474,24 @@ func main() {
 
 	// Inicializar el Orchestrator
 	orch := &orchestrator.Orchestrator{
-		MinReplicas:        minReplicas,
-		MaxReplicas:        maxReplicas,
-		StreamsPerInstance: streamsPerInstance,
-		IdleTimeout:        idleTimeout,
-		Profile:            composeProfile,
-		Image:              acestreamImage,
-		DockerHost:         dockerHost,
-		ComposeProject:     composeProject,
-		ComposeWorkingDir:  composeWorkingDir,
+		MinReplicas:               minReplicas,
+		MaxReplicas:               maxReplicas,
+		StreamsPerInstance:        streamsPerInstance,
+		IdleTimeout:               idleTimeout,
+		Profile:                   composeProfile,
+		Image:                     acestreamImage,
+		DockerHost:                dockerHost,
+		ComposeProject:            composeProject,
+		ComposeWorkingDir:         composeWorkingDir,
+		ContainerFailureThreshold: containerFailureThreshold,
+		StreamFailureThreshold:    streamFailureThreshold,
 	}
 	if err := orch.Init(); err != nil {
 		slog.Error("Failed to initialize orchestrator", "error", err)
 		os.Exit(1)
 	}
 	go orch.ScaleDownLoop()
+	go orch.MonitorLoop()
 
 	// Create a new Acexy instance
 	acexy := &acexy.Acexy{

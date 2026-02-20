@@ -22,16 +22,17 @@ const (
 
 // AceStreamInstance representa una instancia de contenedor AceStream en el pool
 type AceStreamInstance struct {
-	ContainerID   string
-	Name          string // nombre del contenedor, ej: acestream-2968d06067f1
-	Host          string
-	Port          int
-	Health        HealthStatus
-	LastCheck     time.Time
-	FailureCount  int
-	ActiveStreams  int
-	CreatedAt     time.Time
-	LastActivity  time.Time
+	ContainerID        string
+	Name               string // nombre del contenedor, ej: acestream-2968d06067f1
+	Host               string
+	Port               int
+	Health             HealthStatus
+	LastCheck          time.Time
+	FailureCount       int  // fallos consecutivos del health check del contenedor
+	StreamFailureCount int  // veces consecutivas que todos los streams activos estaban colgados
+	ActiveStreams       int
+	CreatedAt          time.Time
+	LastActivity       time.Time
 }
 
 // Orchestrator gestiona el pool de instancias AceStream
@@ -47,15 +48,17 @@ type Orchestrator struct {
 	image              string // imagen Docker a usar
 
 	// Exportados para acceso desde acexy.go
-	MinReplicas        int
-	MaxReplicas        int
-	StreamsPerInstance int
-	IdleTimeout        time.Duration
-	Profile            string
-	Image              string
-	DockerHost         string
-	ComposeProject     string // valor de com.docker.compose.project
-	ComposeWorkingDir  string // valor de com.docker.compose.project.working_dir
+	MinReplicas               int
+	MaxReplicas               int
+	StreamsPerInstance        int
+	IdleTimeout               time.Duration
+	Profile                   string
+	Image                     string
+	DockerHost                string
+	ComposeProject            string // valor de com.docker.compose.project
+	ComposeWorkingDir         string // valor de com.docker.compose.project.working_dir
+	ContainerFailureThreshold int    // fallos consecutivos del health check antes de marcar Unhealthy
+	StreamFailureThreshold    int    // veces que todos los streams fallan antes de marcar Unhealthy
 }
 
 // Init inicializa el Orchestrator, conecta con Docker y levanta minReplicas instancias
@@ -67,7 +70,14 @@ func (o *Orchestrator) Init() error {
 	o.idleTimeout = o.IdleTimeout
 	o.profile = o.Profile
 	o.image = o.Image
-	// ComposeProject y ComposeWorkingDir se usan directamente desde los campos exportados
+
+	// Defaults para umbrales si no se han configurado
+	if o.ContainerFailureThreshold <= 0 {
+		o.ContainerFailureThreshold = 3
+	}
+	if o.StreamFailureThreshold <= 0 {
+		o.StreamFailureThreshold = 3
+	}
 
 	o.instances = make(map[string]*AceStreamInstance)
 	o.mutex = &sync.RWMutex{}

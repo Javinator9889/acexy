@@ -290,6 +290,18 @@ experience, but you may need to adjust them to fit your needs.
       <th>Docker host URL. Should point to a Docker socket proxy, never mount the socket directly.</th>
       <th><code>tcp://docker-proxy:2375</code></th>
     </tr>
+    <tr>
+      <th><code>-container-failure-threshold</code></th>
+      <th><code>ACESTREAM_CONTAINER_FAILURE_THRESHOLD</code></th>
+      <th>Consecutive container health check failures before marking an instance as unhealthy and replacing it.</th>
+      <th><code>3</code></th>
+    </tr>
+    <tr>
+      <th><code>-stream-failure-threshold</code></th>
+      <th><code>ACESTREAM_STREAM_FAILURE_THRESHOLD</code></th>
+      <th>Consecutive times all active streams in an instance stall before marking it as unhealthy and replacing it.</th>
+      <th><code>3</code></th>
+    </tr>
   </tbody>
 </table>
 
