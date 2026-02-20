@@ -173,7 +173,7 @@ func (o *Orchestrator) WaitForInstance(timeout time.Duration) *AceStreamInstance
 // SelectInstance picks the best available instance:
 // - Health == Healthy
 // - ActiveStreams < streamsPerInstance
-// - Prefers the instance with the fewest active streams
+// - Prefers the instance with the most active streams (bin-packing strategy)
 // Returns nil if no instance is available.
 func (o *Orchestrator) SelectInstance() *AceStreamInstance {
 	o.mutex.RLock()
@@ -187,7 +187,7 @@ func (o *Orchestrator) SelectInstance() *AceStreamInstance {
 		if inst.ActiveStreams >= o.streamsPerInstance {
 			continue
 		}
-		if best == nil || inst.ActiveStreams < best.ActiveStreams {
+		if best == nil || inst.ActiveStreams > best.ActiveStreams {
 			best = inst
 		}
 	}
