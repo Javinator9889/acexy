@@ -1,5 +1,6 @@
 services:
   acexy:
+    image: fralermo/acexy:latest
     build:
       context: .
       dockerfile: Dockerfile
