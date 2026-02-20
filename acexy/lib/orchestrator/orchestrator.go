@@ -64,6 +64,7 @@ type Orchestrator struct {
 	DockerHost                string
 	ComposeProject            string // value of com.docker.compose.project
 	ComposeWorkingDir         string // value of com.docker.compose.project.working_dir
+	ContainerNetwork          string // Docker network acexy is connected to; used to attach AceStream instances
 	ContainerFailureThreshold int    // consecutive health check failures before marking Unhealthy
 	StreamFailureThreshold    int    // consecutive times all streams stall before marking Unhealthy
 }

@@ -273,14 +273,14 @@ func (s *Size) Set(value string) error {
 	return nil
 }
 
-// readComposeLabels reads the Docker Compose labels of the current container
-// by reading /proc/self/cgroup to obtain the container ID and then inspecting it.
+// readContainerInfo reads Docker Compose labels and the container network from the current container
+// by reading /etc/hostname to obtain the container ID and then inspecting it.
 // If it cannot be determined (e.g. running outside Docker), it returns empty strings.
-func readComposeLabels() (project, workingDir string) {
+func readContainerInfo() (project, workingDir, containerNetwork string) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		slog.Debug("Could not read hostname for compose labels", "error", err)
-		return "", ""
+		return "", "", ""
 	}
 
 	// The hostname inside a Docker container is the container ID (first 12 chars).
@@ -294,7 +294,7 @@ func readComposeLabels() (project, workingDir string) {
 
 	containerID := strings.TrimSpace(string(data))
 	if containerID == "" {
-		return "", ""
+		return "", "", ""
 	}
 
 	// Connect to Docker to inspect the current container
@@ -305,7 +305,7 @@ func readComposeLabels() (project, workingDir string) {
 	)
 	if err != nil {
 		slog.Debug("Could not create docker client to read compose labels", "error", err)
-		return "", ""
+		return "", "", ""
 	}
 	defer cli.Close()
 
@@ -315,13 +315,20 @@ func readComposeLabels() (project, workingDir string) {
 	info, err := cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		slog.Debug("Could not inspect own container", "containerID", containerID[:12], "error", err)
-		return "", ""
+		return "", "", ""
 	}
 
 	project = info.Config.Labels["com.docker.compose.project"]
 	workingDir = info.Config.Labels["com.docker.compose.project.working_dir"]
-	slog.Debug("Read compose labels", "project", project, "workingDir", workingDir)
-	return project, workingDir
+
+	// Pick the first network the container is connected to
+	for name := range info.NetworkSettings.Networks {
+		containerNetwork = name
+		break
+	}
+
+	slog.Debug("Read container info", "project", project, "workingDir", workingDir, "network", containerNetwork)
+	return project, workingDir, containerNetwork
 }
 
 func (s *Size) String() string { return humanize.Bytes(s.Bytes) }
@@ -490,9 +497,9 @@ func main() {
 	} else {
 		endpoint = acexy.MPEG_TS_ENDPOINT
 	}
-	// Read the Compose labels of the current container so that dynamic instances
-	// belong to the same Compose stack
-	composeProject, composeWorkingDir := readComposeLabels()
+	// Read the Compose labels and network of the current container so that dynamic
+	// instances belong to the same Compose stack and network
+	composeProject, composeWorkingDir, containerNetwork := readContainerInfo()
 
 	// Initialize the Orchestrator
 	orch := &orchestrator.Orchestrator{
@@ -508,6 +515,7 @@ func main() {
 		DockerHost:                dockerHost,
 		ComposeProject:            composeProject,
 		ComposeWorkingDir:         composeWorkingDir,
+		ContainerNetwork:          containerNetwork,
 		ContainerFailureThreshold: containerFailureThreshold,
 		StreamFailureThreshold:    streamFailureThreshold,
 	}

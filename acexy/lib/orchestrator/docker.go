@@ -23,9 +23,9 @@ func randomHex(n int) string {
 }
 
 const (
-	aceStreamVolumeBind = "/opt/docker/volumes/localstreams/acestream:/home/localstreams/.ACEStream"
-	regularNetwork      = "acexy-orchestrator-network"
-	vpnContainer        = "gluetun"
+	aceStreamVolumeBind   = "/opt/docker/volumes/localstreams/acestream:/home/localstreams/.ACEStream"
+	defaultRegularNetwork = "bridge"
+	vpnContainer          = "gluetun"
 )
 
 // containerRemoveOptions returns the standard options for removing containers.
@@ -86,11 +86,15 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 
 	// In regular mode, explicitly connect to the network after the container starts
 	if o.profile != "vpn" {
-		if err := o.dockerClient.NetworkConnect(ctx, regularNetwork, resp.ID, &network.EndpointSettings{}); err != nil {
-			_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
-			return "", "", "", fmt.Errorf("failed to connect container to network %s: %w", regularNetwork, err)
+		net := o.ContainerNetwork
+		if net == "" {
+			net = defaultRegularNetwork
 		}
-		slog.Debug("Container connected to network", "network", regularNetwork, "containerID", resp.ID[:12])
+		if err := o.dockerClient.NetworkConnect(ctx, net, resp.ID, &network.EndpointSettings{}); err != nil {
+			_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
+			return "", "", "", fmt.Errorf("failed to connect container to network %s: %w", net, err)
+		}
+		slog.Debug("Container connected to network", "network", net, "containerID", resp.ID[:12])
 	}
 
 	// Get the container's IP on the correct network
@@ -120,7 +124,7 @@ func (o *Orchestrator) containerExists(ctx context.Context, containerID string) 
 
 // getContainerHost returns the host to connect to in order to reach the container.
 // In VPN mode it returns "localhost" (shared network with gluetun).
-// In regular mode it returns the container IP on acexy-orchestrator-network.
+// In regular mode it returns the container IP on the configured network.
 func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string) (string, error) {
 	if o.profile == "vpn" {
 		return "localhost", nil
@@ -131,7 +135,11 @@ func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string)
 		return "", fmt.Errorf("failed to inspect container: %w", err)
 	}
 
-	if netSettings, ok := inspect.NetworkSettings.Networks[regularNetwork]; ok {
+	net := o.ContainerNetwork
+	if net == "" {
+		net = defaultRegularNetwork
+	}
+	if netSettings, ok := inspect.NetworkSettings.Networks[net]; ok {
 		if netSettings.IPAddress != "" {
 			return netSettings.IPAddress, nil
 		}
