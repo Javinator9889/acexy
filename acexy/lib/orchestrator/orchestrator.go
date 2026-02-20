@@ -137,8 +137,10 @@ func (o *Orchestrator) Init() error {
 	// Reset lastPoolActivity after all initial instances are ready so the recycle
 	// timeout starts counting from when the pool is actually available, not from
 	// when Init() was called.
+	// Mark as recycled so the pool is not recycled until the first real stream arrives.
 	o.mutex.Lock()
 	o.lastPoolActivity = time.Now()
+	o.recycled = true
 	o.mutex.Unlock()
 
 	return nil
