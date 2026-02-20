@@ -47,7 +47,7 @@ type Orchestrator struct {
 	profile              string    // "regular" or "vpn"
 	image                string    // Docker image to use
 	lastPoolActivity     time.Time // last time any stream was active across the whole pool
-	recycling            bool      // true while a recycle is in progress, prevents concurrent recycles
+	recycled             bool      // true after a recycle, reset only when a new stream arrives
 	recycleCheckInterval time.Duration // how often recycleIfIdle is checked
 	scaleDownInterval    time.Duration // how often scaleDownIdle is checked
 
@@ -151,11 +151,11 @@ func (o *Orchestrator) TotalInstances() int {
 	return len(o.instances)
 }
 
-// IsRecycling returns true if a pool recycle is currently in progress.
+// IsRecycling returns true if the pool has been recycled and is waiting for a new stream.
 func (o *Orchestrator) IsRecycling() bool {
 	o.mutex.RLock()
 	defer o.mutex.RUnlock()
-	return o.recycling
+	return o.recycled
 }
 
 // WaitForInstance blocks until a healthy instance is available or the timeout expires.
@@ -269,11 +269,12 @@ func (o *Orchestrator) removeContainer(ctx context.Context, containerID string) 
 	return o.dockerClient.ContainerRemove(ctx, containerID, containerRemoveOptions())
 }
 
-// TouchPoolActivity updates the last activity timestamp of the pool.
+// TouchPoolActivity updates the last activity timestamp of the pool and resets the recycled flag.
 // Must be called from acexy.go whenever a new stream is assigned to any instance.
 func (o *Orchestrator) TouchPoolActivity() {
 	o.mutex.Lock()
 	o.lastPoolActivity = time.Now()
+	o.recycled = false
 	o.mutex.Unlock()
 }
 
@@ -340,7 +341,7 @@ func (o *Orchestrator) scaleDownIdle() {
 // recycleIfIdle replaces the entire pool with fresh instances when the pool has had
 // no active streams for longer than RecycleTimeout. This prevents AceStream state
 // (cache, stale connections) from accumulating over time.
-// A recycling flag prevents concurrent recycles while ScaleUp is still running.
+// Once recycled, the pool will not recycle again until a new stream arrives (recycled flag).
 func (o *Orchestrator) recycleIfIdle() {
 	if o.RecycleTimeout <= 0 {
 		return
@@ -349,10 +350,10 @@ func (o *Orchestrator) recycleIfIdle() {
 	o.mutex.RLock()
 	activeStreams := o.totalActiveStreams()
 	idleSince := o.lastPoolActivity
-	alreadyRecycling := o.recycling
+	alreadyRecycled := o.recycled
 	o.mutex.RUnlock()
 
-	if alreadyRecycling {
+	if alreadyRecycled {
 		return
 	}
 	if activeStreams > 0 {
@@ -366,16 +367,6 @@ func (o *Orchestrator) recycleIfIdle() {
 		"idleSince", idleSince,
 		"recycleTimeout", o.RecycleTimeout,
 	)
-
-	// Mark recycling in progress to prevent concurrent recycles
-	o.mutex.Lock()
-	o.recycling = true
-	o.mutex.Unlock()
-	defer func() {
-		o.mutex.Lock()
-		o.recycling = false
-		o.mutex.Unlock()
-	}()
 
 	// Remove all current instances
 	o.mutex.Lock()
@@ -400,9 +391,9 @@ func (o *Orchestrator) recycleIfIdle() {
 		}
 	}
 
-	// Update lastPoolActivity again after all instances are up so the full
-	// startup time does not count towards the next recycle timeout.
+	// Mark as recycled so the pool is not recycled again until a new stream arrives.
 	o.mutex.Lock()
+	o.recycled = true
 	o.lastPoolActivity = time.Now()
 	o.mutex.Unlock()
 }
