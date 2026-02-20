@@ -8,15 +8,15 @@ import (
 	"time"
 )
 
-// MonitorLoop comprueba periódicamente el estado de todas las instancias del pool.
-// Debe ejecutarse en una goroutine separada.
+// MonitorLoop periodically checks the health of all instances in the pool.
+// It must be run in a separate goroutine.
 //
-// Para cada instancia comprueba dos cosas independientes:
-//  1. El contenedor responde al health check HTTP (checkContainerHealth)
-//  2. Los streams activos en la instancia están recibiendo datos (checkStreamHealth)
+// For each instance it checks two independent conditions:
+//  1. The container responds to the HTTP health check (checkContainerHealth)
+//  2. The active streams on the instance are receiving data (checkStreamHealth)
 //
-// Si cualquiera de las dos condiciones supera el umbral de fallos, la instancia
-// se marca como Unhealthy y se tumba y reemplaza (killAndReplace).
+// If either condition exceeds its failure threshold, the instance is marked
+// Unhealthy and replaced via killAndReplace.
 func (o *Orchestrator) MonitorLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -35,7 +35,7 @@ func (o *Orchestrator) MonitorLoop() {
 	}
 }
 
-// monitorInstance evalúa el estado de una instancia y actúa si está enferma.
+// monitorInstance evaluates the health of a single instance and acts if it is unhealthy.
 func (o *Orchestrator) monitorInstance(inst *AceStreamInstance) {
 	containerHealthy := o.checkContainerHealth(inst)
 	streamsHealthy := o.checkStreamHealth(inst)
@@ -52,9 +52,9 @@ func (o *Orchestrator) monitorInstance(inst *AceStreamInstance) {
 	}
 }
 
-// checkContainerHealth comprueba si el contenedor responde al endpoint de versión de AceStream.
-// Incrementa FailureCount en cada fallo y lo resetea cuando responde correctamente.
-// Marca la instancia como Unhealthy si FailureCount >= ContainerFailureThreshold.
+// checkContainerHealth checks whether the container responds to the AceStream version endpoint.
+// It increments FailureCount on each failure and resets it on success.
+// Marks the instance as Unhealthy when FailureCount >= ContainerFailureThreshold.
 func (o *Orchestrator) checkContainerHealth(inst *AceStreamInstance) bool {
 	url := fmt.Sprintf("http://%s:%d/webui/api/service?method=get_version", inst.Host, inst.Port)
 	httpClient := &http.Client{Timeout: 3 * time.Second}
@@ -89,12 +89,12 @@ func (o *Orchestrator) checkContainerHealth(inst *AceStreamInstance) bool {
 	}
 
 	inst.Health = Degraded
-	return true // Degraded pero no Unhealthy todavía
+	return true // Degraded but not yet Unhealthy
 }
 
-// checkStreamHealth evalúa si los streams activos de la instancia están fallando.
-// No accede al Copier directamente: acexy.go notifica mediante MarkStreamStalled
-// y ResetStreamFailures. Este método solo consulta StreamFailureCount.
+// checkStreamHealth evaluates whether the active streams on the instance are failing.
+// It does not access the Copier directly: acexy.go notifies via MarkStreamStalled
+// and ResetStreamFailures. This method only reads StreamFailureCount.
 func (o *Orchestrator) checkStreamHealth(inst *AceStreamInstance) bool {
 	if inst.ActiveStreams == 0 {
 		return true
@@ -113,15 +113,15 @@ func (o *Orchestrator) checkStreamHealth(inst *AceStreamInstance) bool {
 	return true
 }
 
-// MarkStreamStalled notifica al orquestador que un stream de una instancia se ha colgado.
-// Solo incrementa el contador si ActiveStreams > 0, diferenciando así un stream que
-// falló durante la reproducción (problema de instancia) de un ID inválido que nunca arrancó.
+// MarkStreamStalled notifies the orchestrator that a stream on an instance has stalled.
+// It only increments the counter when ActiveStreams > 0, distinguishing a stream that
+// failed during playback (instance problem) from an invalid ID that never started.
 func (o *Orchestrator) MarkStreamStalled(inst *AceStreamInstance) {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
 
 	if inst.ActiveStreams == 0 {
-		// El stream nunca arrancó correctamente — ID inválido u otro error previo
+		// The stream never started correctly — invalid ID or earlier error
 		return
 	}
 
@@ -133,9 +133,9 @@ func (o *Orchestrator) MarkStreamStalled(inst *AceStreamInstance) {
 	)
 }
 
-// ResetStreamFailures resetea el contador de fallos de streams de una instancia.
-// Debe llamarse cuando un stream se reconecta con éxito, indicando que la instancia
-// está funcionando correctamente.
+// ResetStreamFailures resets the stream failure counter for an instance.
+// Should be called when a stream reconnects successfully, indicating the instance
+// is working correctly again.
 func (o *Orchestrator) ResetStreamFailures(inst *AceStreamInstance) {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()

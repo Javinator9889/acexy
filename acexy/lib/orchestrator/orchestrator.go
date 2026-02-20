@@ -82,9 +82,7 @@ func (o *Orchestrator) Init() error {
 	o.instances = make(map[string]*AceStreamInstance)
 	o.mutex = &sync.RWMutex{}
 	// Copiar campos exportados adicionales
-	// (los demás ya se copian abajo)
-
-	// Conectar con Docker vía socket proxy
+	// Connect to Docker via socket proxy
 	dockerHost := o.DockerHost
 	if dockerHost == "" {
 		dockerHost = "tcp://docker-proxy:2375"
@@ -120,7 +118,7 @@ func (o *Orchestrator) Init() error {
 	return nil
 }
 
-// TotalInstances devuelve el número de instancias activas en el pool
+// TotalInstances returns the number of active instances in the pool.
 func (o *Orchestrator) TotalInstances() int {
 	o.mutex.RLock()
 	defer o.mutex.RUnlock()
@@ -151,8 +149,8 @@ func (o *Orchestrator) SelectInstance() *AceStreamInstance {
 	return best
 }
 
-// ScaleUp crea un nuevo contenedor AceStream, espera a que esté healthy,
-// lo añade al pool y lo devuelve
+// ScaleUp creates a new AceStream container, waits for it to become healthy,
+// adds it to the pool and returns it.
 func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 	ctx := context.Background()
 
@@ -163,7 +161,7 @@ func (o *Orchestrator) ScaleUp() (*AceStreamInstance, error) {
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}
 
-	// Comunicación container-to-container: siempre puerto interno 6878
+	// Container-to-container communication: always use internal port 6878
 	const aceStreamPort = 6878
 
 	instance := &AceStreamInstance{
@@ -225,8 +223,8 @@ func (o *Orchestrator) removeContainer(ctx context.Context, containerID string) 
 	return o.dockerClient.ContainerRemove(ctx, containerID, containerRemoveOptions())
 }
 
-// ScaleDownLoop revisa periódicamente las instancias idle y las elimina si procede.
-// Debe ejecutarse en una goroutine separada.
+// ScaleDownLoop periodically checks for idle instances and removes them when appropriate.
+// It must be run in a separate goroutine.
 func (o *Orchestrator) ScaleDownLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()

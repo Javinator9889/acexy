@@ -70,7 +70,7 @@ type ongoingStream struct {
 	stream   *AceStream
 	copier   *Copier
 	writers  *pmw.PMultiWriter
-	instance *orchestrator.AceStreamInstance // nil si no hay orquestación
+	instance *orchestrator.AceStreamInstance // nil if orchestration is disabled
 }
 
 // Structure referencing the AceStream Proxy - this is, ourselves
@@ -83,7 +83,7 @@ type Acexy struct {
 	EmptyRetryCount   int           // Number of reconnect attempts when a stream stalls (0 = no retry)
 	BufferSize        int           // The buffer size to use when copying the data
 	NoResponseTimeout time.Duration // Timeout to wait for a response from the AceStream middleware
-	Orchestrator      *orchestrator.Orchestrator // nil si no hay orquestación dinámica
+	Orchestrator      *orchestrator.Orchestrator // nil if dynamic orchestration is disabled
 
 	// Information about ongoing streams
 	streams    map[AceID]*ongoingStream
@@ -133,7 +133,7 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		return stream.stream, nil
 	}
 
-	// Elegir instancia via orchestrator o fallback al backend estático
+	// Select instance via orchestrator or fall back to the static backend
 	var middlewareResp *AceStreamMiddleware
 	var err error
 	var instance *orchestrator.AceStreamInstance
@@ -151,8 +151,8 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 				return nil, errors.New("max replicas reached, no instance available")
 			}
 		}
-		// Incrementar antes del request para evitar race condition:
-		// si dos streams llegan a la vez, el segundo ya verá ActiveStreams=1
+		// Increment before the request to avoid a race condition:
+		// if two streams arrive simultaneously, the second will already see ActiveStreams=1
 		instance.ActiveStreams++
 		instance.LastActivity = time.Now()
 		slog.Debug("Instance stream count", "instance", instance.Name,
@@ -263,9 +263,9 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 	return nil
 }
 
-// runStreamLoop gestiona el ciclo de vida de la copia de un stream.
-// Es la única goroutine responsable de: ejecutar el Copier, manejar stalls,
-// reintentar y cerrar el canal done cuando el stream termina.
+// runStreamLoop manages the copy lifecycle of a stream.
+// It is the single goroutine responsible for: running the Copier, handling stalls,
+// retrying, and closing the done channel when the stream ends.
 func (a *Acexy) runStreamLoop(os *ongoingStream, stream *AceStream) {
 	retries := a.EmptyRetryCount
 	for {
@@ -293,8 +293,8 @@ func (a *Acexy) runStreamLoop(os *ongoingStream, stream *AceStream) {
 	a.closeStreamDone(os, stream.ID)
 }
 
-// logCopyError loguea el error de copia según su tipo.
-// Los errores de conexión cerrada son debug; el resto son debug también salvo nil (fin normal).
+// logCopyError logs a copy error according to its type.
+// Closed connection errors are logged at debug level; nil means a normal end and is ignored.
 func (a *Acexy) logCopyError(err error, id AceID) {
 	if err == nil {
 		return
@@ -306,24 +306,30 @@ func (a *Acexy) logCopyError(err error, id AceID) {
 	}
 }
 
-// notifyStall notifica al orquestador que el stream se ha colgado y loguea el intento de reconexión.
-// Solo notifica si hay orquestador activo, diferenciando stalls de IDs inválidos (ver MarkStreamStalled).
+// notifyStall notifies the orchestrator that the stream has stalled and logs the reconnect attempt.
+// Only notifies when the orchestrator is active, distinguishing stalls from invalid IDs (see MarkStreamStalled).
 func (a *Acexy) notifyStall(os *ongoingStream, id AceID, attemptsLeft int) {
 	if a.Orchestrator != nil && os.instance != nil {
 		a.Orchestrator.MarkStreamStalled(os.instance)
+		slog.Warn("Stream stalled, reconnecting",
+			"stream", id,
+			"instance", os.instance.Name,
+			"attemptsLeft", attemptsLeft,
+		)
+	} else {
+		slog.Warn("Stream stalled, reconnecting", "stream", id, "attemptsLeft", attemptsLeft)
 	}
-	slog.Warn("Stream stalled, reconnecting", "stream", id, "attemptsLeft", attemptsLeft)
 }
 
-// notifyRecovered notifica al orquestador que el stream se ha reconectado con éxito.
+// notifyRecovered notifies the orchestrator that the stream has successfully reconnected.
 func (a *Acexy) notifyRecovered(os *ongoingStream) {
 	if a.Orchestrator != nil && os.instance != nil {
 		a.Orchestrator.ResetStreamFailures(os.instance)
 	}
 }
 
-// handleStall decide cómo recuperar un stream colgado:
-// si la instancia está Unhealthy, migra a una sana; si no, reconecta en la misma.
+// handleStall decides how to recover a stalled stream:
+// if the instance is Unhealthy it migrates to a healthy one; otherwise it reconnects to the same instance.
 func (a *Acexy) handleStall(os *ongoingStream, stream *AceStream) error {
 	if a.Orchestrator != nil && os.instance != nil && os.instance.Health == orchestrator.Unhealthy {
 		return a.migrateStream(os, stream)
@@ -354,8 +360,11 @@ func (a *Acexy) migrateStream(os *ongoingStream, stream *AceStream) error {
 	return a.reconnectStream(os, stream)
 }
 
-// reconnectStream abre una nueva conexión al PlaybackURL y actualiza el Copier y el player.
+// reconnectStream opens a new connection to the PlaybackURL and updates the Copier and player.
 func (a *Acexy) reconnectStream(os *ongoingStream, stream *AceStream) error {
+	if os.instance != nil {
+		slog.Info("Reconnecting stream", "stream", stream.ID, "instance", os.instance.Name)
+	}
 	newResp, err := a.middleware.Get(stream.PlaybackURL)
 	if err != nil {
 		return err
@@ -385,13 +394,21 @@ func (a *Acexy) getOrCreateHealthyInstance() (*orchestrator.AceStreamInstance, e
 
 // closeStreamDone cierra el canal done del stream si no estaba ya cerrado.
 func (a *Acexy) closeStreamDone(os *ongoingStream, id AceID) {
-	slog.Debug("Copy done", "stream", id)
+	if os.instance != nil {
+		slog.Debug("Copy done", "stream", id, "instance", os.instance.Name)
+	} else {
+		slog.Debug("Copy done", "stream", id)
+	}
 	select {
 	case <-os.done:
 		slog.Debug("Stream already closed", "stream", id)
 	default:
 		close(os.done)
-		slog.Debug("Stream closed", "stream", id)
+		if os.instance != nil {
+			slog.Info("Stream closed", "stream", id, "instance", os.instance.Name)
+		} else {
+			slog.Info("Stream closed", "stream", id)
+		}
 	}
 }
 
@@ -409,7 +426,7 @@ func (a *Acexy) releaseStream(stream *AceStream) error {
 		return fmt.Errorf(`stream "%s" has clients`, stream.ID)
 	}
 
-	// Decrementar ActiveStreams en la instancia cuando el último cliente abandona
+	// Decrement ActiveStreams on the instance when the last client leaves
 	if ongoingStream.instance != nil {
 		if ongoingStream.instance.ActiveStreams > 0 {
 			ongoingStream.instance.ActiveStreams--
@@ -620,8 +637,8 @@ func (a *Acexy) GetStatus(id *AceID) (AcexyStatus, error) {
 	return AcexyStatus{}, fmt.Errorf(`stream "%s" not found`, id)
 }
 
-// GetStreamFromInstance realiza la petición al backend de una instancia específica del pool.
-// Es equivalente a GetStream pero usa el host/port de la instancia en lugar del estático.
+// GetStreamFromInstance performs a stream request against a specific instance in the pool.
+// It is equivalent to GetStream but uses the instance host/port instead of the static backend.
 func GetStreamFromInstance(instance *orchestrator.AceStreamInstance, a *Acexy, aceId AceID, extraParams url.Values) (*AceStreamMiddleware, error) {
 	slog.Debug("Getting stream from instance", "id", aceId, "host", instance.Host, "port", instance.Port)
 

@@ -271,8 +271,8 @@ func (s *Size) Set(value string) error {
 }
 
 // readComposeLabels lee las labels de Docker Compose del contenedor actual
-// leyendo /proc/self/cgroup para obtener el container ID y luego inspeccionándolo.
-// Si no se puede determinar (ej: ejecución fuera de Docker), devuelve strings vacíos.
+// by reading /proc/self/cgroup to obtain the container ID and then inspecting it.
+// If it cannot be determined (e.g. running outside Docker), it returns empty strings.
 func readComposeLabels() (project, workingDir string) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -469,7 +469,7 @@ func main() {
 		endpoint = acexy.MPEG_TS_ENDPOINT
 	}
 	// Leer las labels de Compose del contenedor actual para que las instancias
-	// dinámicas pertenezcan al mismo stack
+	// so that dynamic instances belong to the same Compose stack
 	composeProject, composeWorkingDir := readComposeLabels()
 
 	// Inicializar el Orchestrator
@@ -516,7 +516,7 @@ func main() {
 	mux.Handle(APIv1_URL+"/status", proxy)
 	mux.Handle("/", http.NotFoundHandler())
 
-	// Capturar señales de shutdown para limpiar contenedores
+	// Capture shutdown signals to clean up containers
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 

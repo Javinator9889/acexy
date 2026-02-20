@@ -28,17 +28,17 @@ const (
 	vpnContainer        = "gluetun"
 )
 
-// containerRemoveOptions devuelve las opciones estándar para eliminar contenedores
+// containerRemoveOptions returns the standard options for removing containers.
 func containerRemoveOptions() container.RemoveOptions {
 	return container.RemoveOptions{
 		Force:         true,
-		RemoveVolumes: false, // no eliminar el volumen de caché
+		RemoveVolumes: false, // keep the AceStream cache volume
 	}
 }
 
-// createContainer crea y arranca un contenedor AceStream según el profile.
-// La comunicación se hace container-to-container en la misma red Docker (puerto interno 6878).
-// Devuelve (containerID, containerName, host, error)
+// createContainer creates and starts an AceStream container according to the configured profile.
+// Communication is container-to-container on the shared Docker network (internal port 6878).
+// Returns (containerID, containerName, host, error).
 func (o *Orchestrator) createContainer(ctx context.Context) (string, string, string, error) {
 	hash := randomHex(6)
 	containerName := fmt.Sprintf("acestream-%s", hash)
@@ -84,7 +84,7 @@ func (o *Orchestrator) createContainer(ctx context.Context) (string, string, str
 		return "", "", "", fmt.Errorf("failed to start container: %w", err)
 	}
 
-	// En modo regular conectamos explícitamente a la red tras arrancar
+	// In regular mode, explicitly connect to the network after the container starts
 	if o.profile != "vpn" {
 		if err := o.dockerClient.NetworkConnect(ctx, regularNetwork, resp.ID, &network.EndpointSettings{}); err != nil {
 			_ = o.dockerClient.ContainerRemove(ctx, resp.ID, containerRemoveOptions())
@@ -145,7 +145,7 @@ func (o *Orchestrator) getContainerHost(ctx context.Context, containerID string)
 	return "", fmt.Errorf("could not determine IP for container %s", containerID[:12])
 }
 
-// pullImageIfNeeded comprueba si la imagen está disponible localmente y hace pull si no lo está.
+// pullImageIfNeeded checks whether the image is available locally and pulls it if not.
 func (o *Orchestrator) pullImageIfNeeded(ctx context.Context) error {
 	images, err := o.dockerClient.ImageList(ctx, image.ListOptions{})
 	if err != nil {
