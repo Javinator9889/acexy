@@ -1,30 +1,27 @@
-name: Go
+name: Build and test
+
 on: [push]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ["1.23","1.24"]
     defaults:
       run:
         working-directory: ./acexy
-    name: Go ${{ matrix.go-version }} sample
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Go ${{ matrix.go-version }}
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: "1.24"
       - name: Install dependencies
         run: go get .
       - name: Build
         run: go build -v ./...
       - name: Test
-        run: go test -v ./... -json > TestResults-${{ matrix.go-version }}.json
+        run: go test -v ./... -json > TestResults.json
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
-          name: Go-results-${{ matrix.go-version }}
-          path: TestResults-${{ matrix.go-version }}.json
+          name: Go-results
+          path: TestResults.json
