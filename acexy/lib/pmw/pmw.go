@@ -56,6 +56,7 @@ type PMultiWriter struct {
 	closed       chan struct{}
 	ctx          context.Context
 	writeTimeout time.Duration
+	onEvict      func(io.Writer)
 }
 
 // PMultiWriterError is an error that occurs when writing to multiple writers.
@@ -92,8 +93,29 @@ func New(ctx context.Context, writeTimeout time.Duration, writers ...io.Writer) 
 	return pmw
 }
 
+// SetOnEvict sets a callback that is called when a writer is evicted due to a write timeout.
+// The callback receives the evicted writer and is called asynchronously.
+func (pmw *PMultiWriter) SetOnEvict(fn func(io.Writer)) {
+	pmw.Lock()
+	defer pmw.Unlock()
+	pmw.onEvict = fn
+}
+
+// evict removes a writer from the list and fires the OnEvict callback if set.
+func (pmw *PMultiWriter) evict(w io.Writer) {
+	pmw.Remove(w)
+	pmw.RLock()
+	fn := pmw.onEvict
+	pmw.RUnlock()
+	if fn != nil {
+		fn(w)
+	}
+}
+
 // Write writes some bytes to all the writers.
-// If a writer takes longer than the configured timeout, it is removed from the list.
+// If a writer takes longer than the configured timeout, it is evicted from the list.
+// A write is considered successful if at least one writer succeeds. An error is only
+// returned when ALL writers fail, preserving the stream for healthy clients.
 func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 	pmw.RLock()
 	// Copy the writers so we can release the lock
@@ -123,10 +145,9 @@ func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 			case err := <-done:
 				results <- writeResult{w: w, err: err}
 			case <-time.After(pmw.writeTimeout):
-				slog.Warn("writer timed out, removing", "writer", w)
+				slog.Warn("writer timed out, evicting", "writer", w)
 				results <- writeResult{w: w, err: context.DeadlineExceeded}
-				// Asynchronously remove the slow writer
-				go pmw.Remove(w)
+				go pmw.evict(w)
 			case <-pmw.closed:
 				results <- writeResult{w: w, err: io.ErrClosedPipe}
 			case <-pmw.ctx.Done():
@@ -135,8 +156,9 @@ func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 		}(w)
 	}
 
-	// Wait for all writes to finish or timeout. If an error occurs, return it.
-	errors := make([]error, 0)
+	// Wait for all writes to finish or timeout.
+	successCount := 0
+	var writeErrors []error
 	for range writers {
 		select {
 		case <-pmw.closed:
@@ -144,13 +166,18 @@ func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 			return 0, io.ErrClosedPipe
 		case res := <-results:
 			if res.err != nil {
-				errors = append(errors, res.err)
+				slog.Debug("writer failed", "writer", res.w, "error", res.err)
+				writeErrors = append(writeErrors, res.err)
+			} else {
+				successCount++
 			}
 		}
 	}
 
-	if len(errors) > 0 {
-		return 0, PMultiWriterError{Errors: errors, Writers: len(writers)}
+	// Only return an error when ALL writers failed. If at least one succeeded,
+	// the stream is healthy and should continue.
+	if successCount == 0 && len(writeErrors) > 0 {
+		return 0, PMultiWriterError{Errors: writeErrors, Writers: len(writers)}
 	}
 
 	return len(p), nil

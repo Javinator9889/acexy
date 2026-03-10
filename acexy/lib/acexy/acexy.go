@@ -64,12 +64,13 @@ type AceStream struct {
 }
 
 type ongoingStream struct {
-	clients uint
-	done    chan struct{}
-	player  *http.Response
-	stream  *AceStream
-	copier  *Copier
-	writers *pmw.PMultiWriter
+	clients  uint
+	done     chan struct{}
+	player   *http.Response
+	stream   *AceStream
+	copier   *Copier
+	writers  *pmw.PMultiWriter
+	evicted  map[io.Writer]struct{} // writers evicted by PMultiWriter timeout
 }
 
 // Structure referencing the AceStream Proxy - this is, ourselves
@@ -147,14 +148,35 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		ID:          aceId,
 	}
 
-	a.streams[aceId] = &ongoingStream{
+	writers := pmw.New(context.Background(), 5*time.Second)
+	os := &ongoingStream{
 		clients: 0,
 		done:    make(chan struct{}),
 		player:  nil,
 		stream:  stream,
-		writers: pmw.New(context.Background(), 5*time.Second),
+		writers: writers,
+		evicted: make(map[io.Writer]struct{}),
 	}
-	slog.Info("Started new stream", "id", aceId, "clients", a.streams[aceId].clients)
+	a.streams[aceId] = os
+
+	// When PMultiWriter evicts a slow consumer, record it and decrement the
+	// client count. StopStream checks this set to avoid double-decrementing.
+	writers.SetOnEvict(func(w io.Writer) {
+		a.mutex.Lock()
+		defer a.mutex.Unlock()
+		os.evicted[w] = struct{}{}
+		if os.clients > 0 {
+			os.clients--
+			slog.Info("Writer evicted by timeout", "stream", aceId, "clients", os.clients)
+		}
+		if os.clients == 0 {
+			if err := a.releaseStream(stream); err != nil {
+				slog.Warn("Error releasing stream after eviction", "error", err)
+			}
+		}
+	})
+
+	slog.Info("Started new stream", "id", aceId, "clients", os.clients)
 	return stream, nil
 }
 
@@ -277,6 +299,15 @@ func (a *Acexy) StopStream(stream *AceStream, out io.Writer) error {
 
 	// Remove the writer from the list of writers
 	ongoingStream.writers.Remove(out)
+
+	// If this writer was already evicted by PMultiWriter timeout, the client
+	// count was already decremented in the OnEvict callback. Skip the
+	// decrement to avoid double-counting.
+	if _, wasEvicted := ongoingStream.evicted[out]; wasEvicted {
+		delete(ongoingStream.evicted, out)
+		slog.Debug("Writer was already evicted, skipping decrement", "stream", stream.ID)
+		return nil
+	}
 
 	// Unregister the client
 	if ongoingStream.clients > 0 {

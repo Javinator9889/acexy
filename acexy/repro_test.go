@@ -188,6 +188,122 @@ func TestDeadlockReproduction(t *testing.T) {
 	respA.Body.Close()
 }
 
+// TestMultiClientStreamSurvival verifies that when a slow client is evicted,
+// the stream continues working for healthy clients. This is the core regression
+// test for the bug where a single slow writer killed the entire stream.
+func TestMultiClientStreamSurvival(t *testing.T) {
+	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, opts)))
+
+	backend := startMockBackend()
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	// Use a small buffer so flushes happen quickly
+	a := &acexy.Acexy{
+		Scheme:            "http",
+		Host:              backendURL.Hostname(),
+		Port:              mustParseInt(backendURL.Port()),
+		Endpoint:          acexy.MPEG_TS_ENDPOINT,
+		EmptyTimeout:      10 * time.Second,
+		BufferSize:        1024,
+		NoResponseTimeout: 2 * time.Second,
+	}
+	a.Init()
+
+	proxy := &Proxy{Acexy: a}
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
+
+	streamID := "survival-test"
+
+	// Client A: healthy reader that actively consumes data
+	t.Log("Client A connecting (healthy reader)...")
+	clientA := &http.Client{Transport: &http.Transport{}}
+	reqA, _ := http.NewRequest("GET", proxyServer.URL+"/ace/getstream?id="+streamID, nil)
+	respA, err := clientA.Do(reqA)
+	if err != nil {
+		t.Fatalf("Client A failed to connect: %v", err)
+	}
+	defer respA.Body.Close()
+
+	// Start actively reading Client A's data in background
+	bytesReadA := make(chan int64, 1)
+	clientAErr := make(chan error, 1)
+	ctx, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	go func() {
+		buf := make([]byte, 4096)
+		var total int64
+		for {
+			select {
+			case <-ctx.Done():
+				bytesReadA <- total
+				return
+			default:
+			}
+			n, err := respA.Body.Read(buf)
+			total += int64(n)
+			if err != nil {
+				clientAErr <- err
+				bytesReadA <- total
+				return
+			}
+		}
+	}()
+
+	// Wait for Client A to start receiving data
+	time.Sleep(500 * time.Millisecond)
+
+	// Client B: slow reader that never reads (will be evicted by PMultiWriter timeout)
+	t.Log("Client B connecting (slow reader - will be evicted)...")
+	clientB := &http.Client{Transport: &http.Transport{}}
+	reqB, _ := http.NewRequest("GET", proxyServer.URL+"/ace/getstream?id="+streamID, nil)
+	respB, err := clientB.Do(reqB)
+	if err != nil {
+		t.Fatalf("Client B failed to connect: %v", err)
+	}
+	// Client B does NOT read. Its OS buffers will fill, then PMultiWriter will evict it.
+
+	// Wait for PMultiWriter's write timeout (5s) to evict Client B, plus margin
+	t.Log("Waiting for Client B eviction...")
+	time.Sleep(8 * time.Second)
+
+	// Close Client B's body now (after eviction)
+	respB.Body.Close()
+
+	// Verify Client A is still receiving data AFTER eviction
+	t.Log("Verifying Client A is still alive after eviction...")
+
+	// Check that no read error occurred on Client A
+	select {
+	case err := <-clientAErr:
+		t.Fatalf("Client A got an error (stream was killed): %v", err)
+	default:
+		// No error - good
+	}
+
+	// Read a bit more data to confirm the stream is still flowing
+	time.Sleep(2 * time.Second)
+
+	select {
+	case err := <-clientAErr:
+		t.Fatalf("Client A got an error after waiting (stream died): %v", err)
+	default:
+		// Still no error - stream survived!
+	}
+
+	// Stop Client A and check total bytes
+	cancelA()
+	totalBytes := <-bytesReadA
+	t.Logf("Client A read %d bytes total - stream survived slow consumer eviction", totalBytes)
+
+	if totalBytes == 0 {
+		t.Fatal("Client A read 0 bytes - stream was not working")
+	}
+}
+
 func mustParseInt(s string) int {
 	var i int
 	fmt.Sscanf(s, "%d", &i)
