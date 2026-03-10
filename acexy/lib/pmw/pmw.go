@@ -80,9 +80,10 @@ func (e PMultiWriterError) Error() string {
 // similar to the Unix tee(1) command. Writers can be added and removed
 // dynamically after creation.
 //
-// Each write is written to each listed writer, one at a time. If a listed
-// writer returns an error, that overall write operation stops and returns the
-// error; it does not continue down the list.
+// Each write is dispatched to all listed writers concurrently, typically using
+// separate goroutines. If one or more writers return an error, the write still
+// proceeds for all writers, and any errors are collected and returned after all
+// writes complete.
 func New(ctx context.Context, writeTimeout time.Duration, writers ...io.Writer) *PMultiWriter {
 	pmw := &PMultiWriter{
 		writers:      writers,
