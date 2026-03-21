@@ -304,6 +304,74 @@ func TestMultiClientStreamSurvival(t *testing.T) {
 	}
 }
 
+// TestSingleClientEvictionNoCrash reproduces the container crash reported in
+// https://github.com/Javinator9889/acexy/issues/44#issuecomment-4057160200
+//
+// Scenario: a single-client stream where the only client never reads. The
+// PMultiWriter write timeout evicts it, causing OnEvict → releaseStream →
+// player.Body.Close(). This makes the copier's io.Copy return, and its
+// cleanup goroutine also calls PMultiWriter.Close(). Before the fix,
+// Close() panicked on the already-closed channel, crashing the process.
+//
+// In Go tests a panic in any goroutine kills the entire test binary, so
+// this test reliably fails (crashes) without the idempotent-Close fix.
+func TestSingleClientEvictionNoCrash(t *testing.T) {
+	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, opts)))
+
+	backend := startMockBackend()
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	a := &acexy.Acexy{
+		Scheme:            "http",
+		Host:              backendURL.Hostname(),
+		Port:              mustParseInt(backendURL.Port()),
+		Endpoint:          acexy.MPEG_TS_ENDPOINT,
+		EmptyTimeout:      10 * time.Second,
+		BufferSize:        1024, // small buffer so flushes happen quickly
+		NoResponseTimeout: 2 * time.Second,
+	}
+	a.Init()
+
+	proxy := &Proxy{Acexy: a}
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
+
+	// Single client connects but NEVER reads — OS buffers fill,
+	// PMultiWriter evicts after 5 s, OnEvict fires with clients 1→0,
+	// releaseStream closes everything, copier goroutine also cleans up.
+	t.Log("Connecting single slow client...")
+	client := &http.Client{Transport: &http.Transport{}}
+	resp, err := client.Get(proxyServer.URL + "/ace/getstream?id=crash-repro")
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	// Wait for the eviction (5 s timeout) + margin for the full
+	// releaseStream → copier cleanup chain to complete.
+	t.Log("Waiting for eviction + cleanup...")
+	time.Sleep(8 * time.Second)
+
+	// Close the response body after the dust has settled.
+	resp.Body.Close()
+
+	// Give a moment for any deferred goroutine panics to surface.
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify the proxy is still alive by hitting the status endpoint.
+	statusResp, err := http.Get(proxyServer.URL + "/ace/status")
+	if err != nil {
+		t.Fatalf("Proxy is dead after eviction: %v", err)
+	}
+	statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("Proxy status returned %d, expected 200", statusResp.StatusCode)
+	}
+	t.Log("Proxy survived single-client eviction without crashing")
+}
+
 func mustParseInt(s string) int {
 	var i int
 	fmt.Sscanf(s, "%d", &i)
