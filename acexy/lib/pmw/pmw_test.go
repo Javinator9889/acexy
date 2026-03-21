@@ -124,6 +124,20 @@ func TestAllWritersFail(t *testing.T) {
 	}
 }
 
+func TestCloseIdempotent(t *testing.T) {
+	w := &fastWriter{}
+	pmw := New(context.Background(), 1*time.Second, w)
+
+	if err := pmw.Close(); err != nil {
+		t.Fatalf("First Close() returned error: %v", err)
+	}
+
+	// Second Close() must not panic
+	if err := pmw.Close(); err != nil {
+		t.Fatalf("Second Close() returned error: %v", err)
+	}
+}
+
 func TestNormalWrite(t *testing.T) {
 	w1 := &fastWriter{}
 	w2 := &fastWriter{}

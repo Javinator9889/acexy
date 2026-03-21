@@ -209,14 +209,20 @@ func (pmw *PMultiWriter) Remove(w io.Writer) {
 	pmw.writers = writers
 }
 
-// Closes all the writers in the list.
+// Closes all the writers in the list. Safe to call multiple times.
 func (pmw *PMultiWriter) Close() error {
 	pmw.RLock()
 	defer pmw.RUnlock()
 
-	var errors []error
+	// Guard against double-close panic
+	select {
+	case <-pmw.closed:
+		return nil
+	default:
+		close(pmw.closed)
+	}
 
-	close(pmw.closed)
+	var errors []error
 	for _, w := range pmw.writers {
 		if c, ok := w.(io.Closer); ok {
 			if err := c.Close(); err != nil {
