@@ -66,6 +66,7 @@ type AceStream struct {
 type ongoingStream struct {
 	clients  uint
 	done     chan struct{}
+	closeDone sync.Once // guards close(done) against concurrent callers
 	player   *http.Response
 	stream   *AceStream
 	copier   *Copier
@@ -124,19 +125,33 @@ func (a *Acexy) Init() {
 // customize the stream.
 func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, error) {
 	a.mutex.Lock()
-	defer a.mutex.Unlock()
 
 	// Check if the stream is already enqueued
 	if stream, ok := a.streams[aceId]; ok {
 		slog.Info("Reusing existing", "stream", aceId, "clients", stream.clients)
+		a.mutex.Unlock()
 		return stream.stream, nil
 	}
 
-	// Enqueue the middleware
+	// Release the mutex BEFORE the HTTP call to the AceStream backend.
+	// GetStream can take up to NoResponseTimeout (10s) and would block
+	// all other operations if the mutex were held.
+	a.mutex.Unlock()
+
 	middleware, err := GetStream(a, aceId, extraParams)
 	if err != nil {
 		slog.Error("Error getting stream middleware", "error", err)
 		return nil, err
+	}
+
+	// Re-acquire the mutex to update state
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	// Another goroutine may have created this stream while the mutex was released
+	if existing, ok := a.streams[aceId]; ok {
+		slog.Info("Reusing existing (created during fetch)", "stream", aceId, "clients", existing.clients)
+		return existing.stream, nil
 	}
 
 	// We got the stream information, build the structure around it and register the stream
@@ -182,11 +197,11 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 
 func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 	a.mutex.Lock()
-	defer a.mutex.Unlock()
 
 	// Get the ongoing stream
 	ongoingStream, ok := a.streams[stream.ID]
 	if !ok {
+		a.mutex.Unlock()
 		slog.Debug("Stream not found", "stream", stream.ID)
 		return fmt.Errorf(`stream "%s" not found`, stream.ID)
 	}
@@ -199,10 +214,34 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 
 	// Check if the stream is already being played
 	if ongoingStream.player != nil {
+		a.mutex.Unlock()
 		return nil
 	}
 
-	resp, err := a.middleware.Get(stream.PlaybackURL)
+	// Release the mutex BEFORE the HTTP call to the AceStream backend.
+	// This call can take up to NoResponseTimeout (10s) and would block
+	// all other operations (FetchStream, StopStream, GetStatus) if the
+	// mutex were held.
+	playbackURL := stream.PlaybackURL
+	a.mutex.Unlock()
+
+	resp, err := a.middleware.Get(playbackURL)
+
+	// Re-acquire the mutex to update state
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	// Re-check the stream still exists (could have been released while
+	// the mutex was not held)
+	ongoingStream, ok = a.streams[stream.ID]
+	if !ok {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		slog.Debug("Stream released during playback fetch", "stream", stream.ID)
+		return fmt.Errorf(`stream "%s" was released`, stream.ID)
+	}
+
 	if err != nil {
 		slog.Error("Failed to forward stream", "error", err)
 		ongoingStream.clients--
@@ -212,6 +251,12 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 			}
 		}
 		return err
+	}
+
+	// Another goroutine may have started playback while the mutex was released
+	if ongoingStream.player != nil {
+		resp.Body.Close()
+		return nil
 	}
 
 	// Forward the response to the writers
@@ -232,13 +277,10 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 			}
 		}
 		slog.Debug("Copy done", "stream", stream.ID)
-		select {
-		case <-ongoingStream.done:
-			slog.Debug("Stream already closed", "stream", stream.ID)
-		default:
+		ongoingStream.closeDone.Do(func() {
 			close(ongoingStream.done)
 			slog.Debug("Stream closed", "stream", stream.ID)
-		}
+		})
 	}()
 
 	ongoingStream.player = resp
@@ -272,14 +314,11 @@ func (a *Acexy) releaseStream(stream *AceStream) error {
 		ongoingStream.player.Body.Close()
 	}
 
-	// Close the `done' channel
-	select {
-	case <-ongoingStream.done:
-		slog.Debug("Stream already closed", "stream", stream.ID)
-	default:
+	// Close the `done' channel (safe for concurrent callers via sync.Once)
+	ongoingStream.closeDone.Do(func() {
 		close(ongoingStream.done)
 		slog.Debug("Stream done", "stream", stream.ID)
-	}
+	})
 	return nil
 }
 

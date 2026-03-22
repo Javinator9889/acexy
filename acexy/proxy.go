@@ -91,19 +91,28 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// And start playing the stream. The `StartStream` will dump the contents of the new or
+	// Set response headers BEFORE starting the stream. Once StartStream is called,
+	// the copier can immediately begin writing to the ResponseWriter from another
+	// goroutine. Headers and WriteHeader must be set first to avoid a data race.
+	switch p.Acexy.Endpoint {
+	case acexy.M3U8_ENDPOINT:
+		w.Header().Set("Content-Type", "application/x-mpegURL")
+	case acexy.MPEG_TS_ENDPOINT:
+		w.Header().Set("Content-Type", "video/MP2T")
+		w.Header().Set("Transfer-Encoding", "chunked")
+	}
+	w.WriteHeader(http.StatusOK)
+
+	// Start playing the stream. The `StartStream` will dump the contents of the new or
 	// existing stream to the client. It takes an interface of `io.Writer` to write the stream
 	// contents to. The `http.ResponseWriter` implements the `io.Writer` interface, so we can
 	// pass it directly.
 	slog.Debug("Starting stream", "path", r.URL.Path, "id", aceId)
 	if err := p.Acexy.StartStream(stream, w); err != nil {
 		slog.Error("Failed to start stream", "stream", aceId, "error", err)
-		http.Error(w, "Failed to start stream: "+err.Error(), http.StatusInternalServerError)
+		// Headers already sent, so we can't use http.Error. Just log and return.
 		return
 	}
-
-	// Update the client headers
-	w.WriteHeader(http.StatusOK)
 
 	// Defer the stream finish. This will be called when the request is done. When in M3U8 mode,
 	// the client connects directly to a subset of endpoints, so we are blind to what the client
@@ -115,15 +124,12 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// This is a blocking operation, so we can finish the stream when the client disconnects.
 	switch p.Acexy.Endpoint {
 	case acexy.M3U8_ENDPOINT:
-		w.Header().Set("Content-Type", "application/x-mpegURL")
 		timedOut := acexy.SetTimeout(streamTimeout)
 		defer func() {
 			<-timedOut
 			p.Acexy.StopStream(stream, w)
 		}()
 	case acexy.MPEG_TS_ENDPOINT:
-		w.Header().Set("Content-Type", "video/MP2T")
-		w.Header().Set("Transfer-Encoding", "chunked")
 		defer p.Acexy.StopStream(stream, w)
 	}
 

@@ -54,6 +54,7 @@ type PMultiWriter struct {
 	sync.RWMutex
 	writers      []io.Writer
 	closed       chan struct{}
+	closeOnce    sync.Once
 	ctx          context.Context
 	writeTimeout time.Duration
 	onEvict      func(io.Writer)
@@ -209,31 +210,28 @@ func (pmw *PMultiWriter) Remove(w io.Writer) {
 	pmw.writers = writers
 }
 
-// Closes all the writers in the list. Safe to call multiple times.
+// Closes all the writers in the list. Safe to call multiple times from
+// concurrent goroutines.
 func (pmw *PMultiWriter) Close() error {
-	pmw.RLock()
-	defer pmw.RUnlock()
+	var closeErrors []error
 
-	// Guard against double-close panic
-	select {
-	case <-pmw.closed:
-		return nil
-	default:
+	pmw.closeOnce.Do(func() {
+		pmw.RLock()
+		defer pmw.RUnlock()
+
 		close(pmw.closed)
-	}
-
-	var errors []error
-	for _, w := range pmw.writers {
-		if c, ok := w.(io.Closer); ok {
-			if err := c.Close(); err != nil {
-				errors = append(errors, err)
+		for _, w := range pmw.writers {
+			if c, ok := w.(io.Closer); ok {
+				if err := c.Close(); err != nil {
+					closeErrors = append(closeErrors, err)
+				}
+				slog.Debug("closed", "w", w)
 			}
-			slog.Debug("closed", "w", w)
 		}
-		/* there could be non-closeable writers. Rely on the channel to exit the goroutine */
-	}
-	if len(errors) > 0 {
-		return PMultiWriterError{Errors: errors, Writers: len(pmw.writers)}
+	})
+
+	if len(closeErrors) > 0 {
+		return PMultiWriterError{Errors: closeErrors, Writers: len(pmw.writers)}
 	}
 	return nil
 }
