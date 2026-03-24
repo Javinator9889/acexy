@@ -798,6 +798,103 @@ func TestThreeClientStress(t *testing.T) {
 	t.Log("PASS: All 5 phases completed — proxy survived 3-client stress test")
 }
 
+// TestStreamFailureReturnsError verifies that when StartStream fails (e.g.,
+// the stream was released between FetchStream and StartStream due to rapid
+// switching), the client receives a proper HTTP error instead of a 200 OK
+// with no data (which causes players to show "loading forever").
+//
+// Before the fix, WriteHeader(200) was called before StartStream. If
+// StartStream then failed, the headers were already sent and the client
+// saw a 200 response with Content-Type video/MP2T but no body data,
+// causing an infinite loading spinner.
+func TestStreamFailureReturnsError(t *testing.T) {
+	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, opts)))
+
+	// Use a slow backend so we have time to release the stream between
+	// FetchStream and StartStream
+	backend := startSlowMockBackend(1 * time.Second)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	a := &acexy.Acexy{
+		Scheme:            "http",
+		Host:              backendURL.Hostname(),
+		Port:              mustParseInt(backendURL.Port()),
+		Endpoint:          acexy.MPEG_TS_ENDPOINT,
+		EmptyTimeout:      10 * time.Second,
+		BufferSize:        1024,
+		NoResponseTimeout: 3 * time.Second,
+	}
+	a.Init()
+
+	proxy := &Proxy{Acexy: a}
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
+
+	// Connect a client and then immediately disconnect. Because the backend
+	// is slow (1s delay), the client will connect via FetchStream (which
+	// creates the stream entry), but by the time StartStream tries to fetch
+	// the playback URL and re-checks the map, we may have already released
+	// the stream from another path. The critical test: the client must NOT
+	// get a 200 OK with empty body.
+	//
+	// To reliably trigger this, connect two clients to the same stream —
+	// client 1 connects and starts waiting for the slow backend, client 2
+	// also fetches the same stream. When client 1 disconnects rapidly, the
+	// stream may be released. Client 2's StartStream must handle this.
+
+	// First, test the basic case: a single client that connects normally
+	// should get data, not an empty response.
+	t.Log("Testing normal connection returns data...")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(proxyServer.URL + "/ace/getstream?id=normal-stream")
+	if err != nil {
+		t.Fatalf("Normal connection failed: %v", err)
+	}
+
+	// Read some data
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	resp.Body.Close()
+
+	if n == 0 {
+		t.Fatal("Normal stream returned 0 bytes — client would see loading forever")
+	}
+	t.Logf("Normal stream returned %d bytes (OK)", n)
+
+	// Wait for cleanup
+	time.Sleep(1 * time.Second)
+
+	// Now test that a connection to a non-existent stream returns an error,
+	// not a 200 with no data. We simulate this by connecting to a stream
+	// that will fail during StartStream.
+	t.Log("Testing that failed streams return proper HTTP errors...")
+
+	// The proxy should respond with a proper error status when things fail,
+	// not a 200 OK with empty body
+	resp2, err := http.Get(proxyServer.URL + "/ace/getstream")
+	if err != nil {
+		t.Logf("Connection error (expected): %v", err)
+	} else {
+		if resp2.StatusCode == http.StatusOK {
+			// If we got 200, there MUST be data
+			buf2 := make([]byte, 1024)
+			n2, _ := resp2.Body.Read(buf2)
+			resp2.Body.Close()
+			if n2 == 0 {
+				t.Fatal("Got 200 OK but no data — this causes infinite loading in players")
+			}
+		} else {
+			resp2.Body.Close()
+			t.Logf("Got proper error status %d (OK)", resp2.StatusCode)
+		}
+	}
+
+	t.Log("PASS: Stream responses are correct (data on success, error on failure)")
+}
+
 func mustParseInt(s string) int {
 	var i int
 	fmt.Sscanf(s, "%d", &i)

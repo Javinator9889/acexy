@@ -93,7 +93,10 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 
 	// Set response headers BEFORE starting the stream. Once StartStream is called,
 	// the copier can immediately begin writing to the ResponseWriter from another
-	// goroutine. Headers and WriteHeader must be set first to avoid a data race.
+	// goroutine. Header map writes are safe before the first Write/WriteHeader call.
+	// We intentionally do NOT call WriteHeader here — Go's HTTP server calls it
+	// implicitly on the first Write, and keeping it implicit means we can still
+	// return an HTTP error if StartStream fails.
 	switch p.Acexy.Endpoint {
 	case acexy.M3U8_ENDPOINT:
 		w.Header().Set("Content-Type", "application/x-mpegURL")
@@ -101,7 +104,6 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/MP2T")
 		w.Header().Set("Transfer-Encoding", "chunked")
 	}
-	w.WriteHeader(http.StatusOK)
 
 	// Start playing the stream. The `StartStream` will dump the contents of the new or
 	// existing stream to the client. It takes an interface of `io.Writer` to write the stream
@@ -110,7 +112,7 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Starting stream", "path", r.URL.Path, "id", aceId)
 	if err := p.Acexy.StartStream(stream, w); err != nil {
 		slog.Error("Failed to start stream", "stream", aceId, "error", err)
-		// Headers already sent, so we can't use http.Error. Just log and return.
+		http.Error(w, "Failed to start stream: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

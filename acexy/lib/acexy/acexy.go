@@ -232,7 +232,8 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 	defer a.mutex.Unlock()
 
 	// Re-check the stream still exists (could have been released while
-	// the mutex was not held)
+	// the mutex was not held). If the stream was released, our writer and
+	// client count were already cleaned up by releaseStream/StopStream.
 	ongoingStream, ok = a.streams[stream.ID]
 	if !ok {
 		if resp != nil {
@@ -244,6 +245,11 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 
 	if err != nil {
 		slog.Error("Failed to forward stream", "error", err)
+		// Remove the writer we added before the HTTP call — if we don't,
+		// the copier (started by another client) will try to write to
+		// this client's now-invalid ResponseWriter, causing a nil pointer
+		// dereference panic.
+		ongoingStream.writers.Remove(out)
 		ongoingStream.clients--
 		if ongoingStream.clients == 0 {
 			if releaseErr := a.releaseStream(stream); releaseErr != nil {
