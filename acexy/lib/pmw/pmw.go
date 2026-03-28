@@ -36,10 +36,14 @@
 package pmw
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // PMultiWriter is an implementation of an "io.Writer" that duplicates its writes
@@ -48,7 +52,12 @@ import (
 // goroutine, so the writes are done in parallel.
 type PMultiWriter struct {
 	sync.RWMutex
-	writers []io.Writer
+	writers      []io.Writer
+	closed       chan struct{}
+	closeOnce    sync.Once
+	ctx          context.Context
+	writeTimeout time.Duration
+	onEvict      func(io.Writer)
 }
 
 // PMultiWriterError is an error that occurs when writing to multiple writers.
@@ -72,44 +81,105 @@ func (e PMultiWriterError) Error() string {
 // similar to the Unix tee(1) command. Writers can be added and removed
 // dynamically after creation.
 //
-// Each write is written to each listed writer, one at a time. If a listed
-// writer returns an error, that overall write operation stops and returns the
-// error; it does not continue down the list.
-func New(writers ...io.Writer) *PMultiWriter {
-	pmw := &PMultiWriter{writers: writers}
+// Each write is dispatched to all listed writers concurrently, typically using
+// separate goroutines. If one or more writers return an error, the write still
+// proceeds for all writers, and any errors are collected and returned after all
+// writes complete.
+func New(ctx context.Context, writeTimeout time.Duration, writers ...io.Writer) *PMultiWriter {
+	pmw := &PMultiWriter{
+		writers:      writers,
+		closed:       make(chan struct{}),
+		ctx:          ctx,
+		writeTimeout: writeTimeout,
+	}
 	return pmw
 }
 
+// SetOnEvict sets a callback that is called when a writer is evicted due to a write timeout.
+// The callback receives the evicted writer and is called asynchronously.
+func (pmw *PMultiWriter) SetOnEvict(fn func(io.Writer)) {
+	pmw.Lock()
+	defer pmw.Unlock()
+	pmw.onEvict = fn
+}
+
+// evict removes a writer from the list and fires the OnEvict callback if set.
+func (pmw *PMultiWriter) evict(w io.Writer) {
+	pmw.Remove(w)
+	pmw.RLock()
+	fn := pmw.onEvict
+	pmw.RUnlock()
+	if fn != nil {
+		fn(w)
+	}
+}
+
 // Write writes some bytes to all the writers.
+// If a writer takes longer than the configured timeout, it is evicted from the list.
+// A write is considered successful if at least one writer succeeds. An error is only
+// returned when ALL writers fail, preserving the stream for healthy clients.
 func (pmw *PMultiWriter) Write(p []byte) (n int, err error) {
 	pmw.RLock()
-	defer pmw.RUnlock()
+	// Copy the writers so we can release the lock
+	writers := make([]io.Writer, len(pmw.writers))
+	copy(writers, pmw.writers)
+	pmw.RUnlock()
 
-	errs := make(chan error, len(pmw.writers))
-	for _, w := range pmw.writers {
+	if len(writers) == 0 {
+		return len(p), nil
+	}
+
+	type writeResult struct {
+		w   io.Writer
+		err error
+	}
+
+	results := make(chan writeResult, len(writers))
+	for _, w := range writers {
 		go func(w io.Writer) {
-			n, err := w.Write(p)
-			// Forward the error and early return
-			if err != nil || n < len(p) {
-				if err == nil && n < len(p) {
-					err = io.ErrShortWrite
-				}
-				errs <- err
-			} else {
-				errs <- nil
+			done := make(chan error, 1)
+			go func() {
+				_, err := w.Write(p)
+				done <- err
+			}()
+
+			select {
+			case err := <-done:
+				results <- writeResult{w: w, err: err}
+			case <-time.After(pmw.writeTimeout):
+				slog.Warn("writer timed out, evicting", "writer", w)
+				results <- writeResult{w: w, err: context.DeadlineExceeded}
+				go pmw.evict(w)
+			case <-pmw.closed:
+				results <- writeResult{w: w, err: io.ErrClosedPipe}
+			case <-pmw.ctx.Done():
+				results <- writeResult{w: w, err: pmw.ctx.Err()}
 			}
 		}(w)
 	}
 
-	// Wait for all writes to finish. If an error occurs, return it.
-	errors := make([]error, 0)
-	for range pmw.writers {
-		if err := <-errs; err != nil {
-			errors = append(errors, err)
+	// Wait for all writes to finish or timeout.
+	successCount := 0
+	var writeErrors []error
+	for range writers {
+		select {
+		case <-pmw.closed:
+			slog.Debug("closed pmw", "pmw", pmw)
+			return 0, io.ErrClosedPipe
+		case res := <-results:
+			if res.err != nil {
+				slog.Debug("writer failed", "writer", res.w, "error", res.err)
+				writeErrors = append(writeErrors, res.err)
+			} else {
+				successCount++
+			}
 		}
 	}
-	if len(errors) > 0 {
-		return len(p), PMultiWriterError{Errors: errors, Writers: len(pmw.writers)}
+
+	// Only return an error when ALL writers failed. If at least one succeeded,
+	// the stream is healthy and should continue.
+	if successCount == 0 && len(writeErrors) > 0 {
+		return 0, PMultiWriterError{Errors: writeErrors, Writers: len(writers)}
 	}
 
 	return len(p), nil
@@ -121,12 +191,9 @@ func (pmw *PMultiWriter) Add(w io.Writer) {
 	defer pmw.Unlock()
 
 	// Check if the writer is already in the list
-	for _, ew := range pmw.writers {
-		if ew == w {
-			return
-		}
+	if !slices.Contains(pmw.writers, w) {
+		pmw.writers = append(pmw.writers, w)
 	}
-	pmw.writers = append(pmw.writers, w)
 }
 
 // Remove will remove a previously added writer from the list of writers.
@@ -143,21 +210,28 @@ func (pmw *PMultiWriter) Remove(w io.Writer) {
 	pmw.writers = writers
 }
 
-// Closes all the writers in the list.
+// Closes all the writers in the list. Safe to call multiple times from
+// concurrent goroutines.
 func (pmw *PMultiWriter) Close() error {
-	pmw.Lock()
-	defer pmw.Unlock()
+	var closeErrors []error
 
-	var errors []error
-	for _, w := range pmw.writers {
-		if c, ok := w.(io.Closer); ok {
-			if err := c.Close(); err != nil {
-				errors = append(errors, err)
+	pmw.closeOnce.Do(func() {
+		pmw.RLock()
+		defer pmw.RUnlock()
+
+		close(pmw.closed)
+		for _, w := range pmw.writers {
+			if c, ok := w.(io.Closer); ok {
+				if err := c.Close(); err != nil {
+					closeErrors = append(closeErrors, err)
+				}
+				slog.Debug("closed", "w", w)
 			}
 		}
-	}
-	if len(errors) > 0 {
-		return PMultiWriterError{Errors: errors, Writers: len(pmw.writers)}
+	})
+
+	if len(closeErrors) > 0 {
+		return PMultiWriterError{Errors: closeErrors, Writers: len(pmw.writers)}
 	}
 	return nil
 }

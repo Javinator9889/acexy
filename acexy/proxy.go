@@ -91,7 +91,21 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// And start playing the stream. The `StartStream` will dump the contents of the new or
+	// Set response headers BEFORE starting the stream. Once StartStream is called,
+	// the copier can immediately begin writing to the ResponseWriter from another
+	// goroutine. Header map writes are safe before the first Write/WriteHeader call.
+	// We intentionally do NOT call WriteHeader here — Go's HTTP server calls it
+	// implicitly on the first Write, and keeping it implicit means we can still
+	// return an HTTP error if StartStream fails.
+	switch p.Acexy.Endpoint {
+	case acexy.M3U8_ENDPOINT:
+		w.Header().Set("Content-Type", "application/x-mpegURL")
+	case acexy.MPEG_TS_ENDPOINT:
+		w.Header().Set("Content-Type", "video/MP2T")
+		w.Header().Set("Transfer-Encoding", "chunked")
+	}
+
+	// Start playing the stream. The `StartStream` will dump the contents of the new or
 	// existing stream to the client. It takes an interface of `io.Writer` to write the stream
 	// contents to. The `http.ResponseWriter` implements the `io.Writer` interface, so we can
 	// pass it directly.
@@ -101,9 +115,6 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to start stream: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	// Update the client headers
-	w.WriteHeader(http.StatusOK)
 
 	// Defer the stream finish. This will be called when the request is done. When in M3U8 mode,
 	// the client connects directly to a subset of endpoints, so we are blind to what the client
@@ -115,15 +126,12 @@ func (p *Proxy) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// This is a blocking operation, so we can finish the stream when the client disconnects.
 	switch p.Acexy.Endpoint {
 	case acexy.M3U8_ENDPOINT:
-		w.Header().Set("Content-Type", "application/x-mpegURL")
 		timedOut := acexy.SetTimeout(streamTimeout)
 		defer func() {
 			<-timedOut
 			p.Acexy.StopStream(stream, w)
 		}()
 	case acexy.MPEG_TS_ENDPOINT:
-		w.Header().Set("Content-Type", "video/MP2T")
-		w.Header().Set("Transfer-Encoding", "chunked")
 		defer p.Acexy.StopStream(stream, w)
 	}
 
@@ -316,7 +324,7 @@ func parseArgs() {
 	flag.DurationVar(
 		&noResponseTimeout,
 		"no-response-timeout",
-		LookupEnvOrDuration("ACEXY_NO_RESPONSE_TIMEOUT", 1*time.Second),
+		LookupEnvOrDuration("ACEXY_NO_RESPONSE_TIMEOUT", 10*time.Second),
 		"timeout in human-readable format to wait for a response from the AceStream middleware. "+
 			"Can be set with ACEXY_NO_RESPONSE_TIMEOUT environment variable. "+
 			"Depending on the network conditions, you may want to adjust this value",

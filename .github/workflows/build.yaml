@@ -1,5 +1,7 @@
 name: Go
-on: [push]
+on:
+  push:
+  pull_request:
 
 jobs:
   build:
@@ -22,9 +24,9 @@ jobs:
       - name: Build
         run: go build -v ./...
       - name: Test
-        run: go test -v ./... -json > TestResults-${{ matrix.go-version }}.json
+        run: go test -v ./... -json | tee TestResults-${{ matrix.go-version }}.json
       - name: Upload test results
         uses: actions/upload-artifact@v4
         with:
           name: Go-results-${{ matrix.go-version }}
-          path: TestResults-${{ matrix.go-version }}.json
+          path: acexy/TestResults-${{ matrix.go-version }}.json

@@ -5,6 +5,7 @@
 package acexy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,12 +64,14 @@ type AceStream struct {
 }
 
 type ongoingStream struct {
-	clients uint
-	done    chan struct{}
-	player  *http.Response
-	stream  *AceStream
-	copier  *Copier
-	writers *pmw.PMultiWriter
+	clients  uint
+	done     chan struct{}
+	closeDone sync.Once // guards close(done) against concurrent callers
+	player   *http.Response
+	stream   *AceStream
+	copier   *Copier
+	writers  *pmw.PMultiWriter
+	evicted  map[io.Writer]struct{} // writers evicted by PMultiWriter timeout
 }
 
 // Structure referencing the AceStream Proxy - this is, ourselves
@@ -122,19 +125,33 @@ func (a *Acexy) Init() {
 // customize the stream.
 func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, error) {
 	a.mutex.Lock()
-	defer a.mutex.Unlock()
 
 	// Check if the stream is already enqueued
 	if stream, ok := a.streams[aceId]; ok {
 		slog.Info("Reusing existing", "stream", aceId, "clients", stream.clients)
+		a.mutex.Unlock()
 		return stream.stream, nil
 	}
 
-	// Enqueue the middleware
+	// Release the mutex BEFORE the HTTP call to the AceStream backend.
+	// GetStream can take up to NoResponseTimeout (10s) and would block
+	// all other operations if the mutex were held.
+	a.mutex.Unlock()
+
 	middleware, err := GetStream(a, aceId, extraParams)
 	if err != nil {
 		slog.Error("Error getting stream middleware", "error", err)
 		return nil, err
+	}
+
+	// Re-acquire the mutex to update state
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	// Another goroutine may have created this stream while the mutex was released
+	if existing, ok := a.streams[aceId]; ok {
+		slog.Info("Reusing existing (created during fetch)", "stream", aceId, "clients", existing.clients)
+		return existing.stream, nil
 	}
 
 	// We got the stream information, build the structure around it and register the stream
@@ -146,24 +163,45 @@ func (a *Acexy) FetchStream(aceId AceID, extraParams url.Values) (*AceStream, er
 		ID:          aceId,
 	}
 
-	a.streams[aceId] = &ongoingStream{
+	writers := pmw.New(context.Background(), 5*time.Second)
+	os := &ongoingStream{
 		clients: 0,
 		done:    make(chan struct{}),
 		player:  nil,
 		stream:  stream,
-		writers: pmw.New(),
+		writers: writers,
+		evicted: make(map[io.Writer]struct{}),
 	}
-	slog.Info("Started new stream", "id", aceId, "clients", a.streams[aceId].clients)
+	a.streams[aceId] = os
+
+	// When PMultiWriter evicts a slow consumer, record it and decrement the
+	// client count. StopStream checks this set to avoid double-decrementing.
+	writers.SetOnEvict(func(w io.Writer) {
+		a.mutex.Lock()
+		defer a.mutex.Unlock()
+		os.evicted[w] = struct{}{}
+		if os.clients > 0 {
+			os.clients--
+			slog.Info("Writer evicted by timeout", "stream", aceId, "clients", os.clients)
+		}
+		if os.clients == 0 {
+			if err := a.releaseStream(stream); err != nil {
+				slog.Warn("Error releasing stream after eviction", "error", err)
+			}
+		}
+	})
+
+	slog.Info("Started new stream", "id", aceId, "clients", os.clients)
 	return stream, nil
 }
 
 func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 	a.mutex.Lock()
-	defer a.mutex.Unlock()
 
 	// Get the ongoing stream
 	ongoingStream, ok := a.streams[stream.ID]
 	if !ok {
+		a.mutex.Unlock()
 		slog.Debug("Stream not found", "stream", stream.ID)
 		return fmt.Errorf(`stream "%s" not found`, stream.ID)
 	}
@@ -176,12 +214,42 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 
 	// Check if the stream is already being played
 	if ongoingStream.player != nil {
+		a.mutex.Unlock()
 		return nil
 	}
 
-	resp, err := a.middleware.Get(stream.PlaybackURL)
+	// Release the mutex BEFORE the HTTP call to the AceStream backend.
+	// This call can take up to NoResponseTimeout (10s) and would block
+	// all other operations (FetchStream, StopStream, GetStatus) if the
+	// mutex were held.
+	playbackURL := stream.PlaybackURL
+	a.mutex.Unlock()
+
+	resp, err := a.middleware.Get(playbackURL)
+
+	// Re-acquire the mutex to update state
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	// Re-check the stream still exists (could have been released while
+	// the mutex was not held). If the stream was released, our writer and
+	// client count were already cleaned up by releaseStream/StopStream.
+	ongoingStream, ok = a.streams[stream.ID]
+	if !ok {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		slog.Debug("Stream released during playback fetch", "stream", stream.ID)
+		return fmt.Errorf(`stream "%s" was released`, stream.ID)
+	}
+
 	if err != nil {
 		slog.Error("Failed to forward stream", "error", err)
+		// Remove the writer we added before the HTTP call — if we don't,
+		// the copier (started by another client) will try to write to
+		// this client's now-invalid ResponseWriter, causing a nil pointer
+		// dereference panic.
+		ongoingStream.writers.Remove(out)
 		ongoingStream.clients--
 		if ongoingStream.clients == 0 {
 			if releaseErr := a.releaseStream(stream); releaseErr != nil {
@@ -189,6 +257,12 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 			}
 		}
 		return err
+	}
+
+	// Another goroutine may have started playback while the mutex was released
+	if ongoingStream.player != nil {
+		resp.Body.Close()
+		return nil
 	}
 
 	// Forward the response to the writers
@@ -209,13 +283,10 @@ func (a *Acexy) StartStream(stream *AceStream, out io.Writer) error {
 			}
 		}
 		slog.Debug("Copy done", "stream", stream.ID)
-		select {
-		case <-ongoingStream.done:
-			slog.Debug("Stream already closed", "stream", stream.ID)
-		default:
+		ongoingStream.closeDone.Do(func() {
 			close(ongoingStream.done)
 			slog.Debug("Stream closed", "stream", stream.ID)
-		}
+		})
 	}()
 
 	ongoingStream.player = resp
@@ -249,14 +320,11 @@ func (a *Acexy) releaseStream(stream *AceStream) error {
 		ongoingStream.player.Body.Close()
 	}
 
-	// Close the `done' channel
-	select {
-	case <-ongoingStream.done:
-		slog.Debug("Stream already closed", "stream", stream.ID)
-	default:
+	// Close the `done' channel (safe for concurrent callers via sync.Once)
+	ongoingStream.closeDone.Do(func() {
 		close(ongoingStream.done)
 		slog.Debug("Stream done", "stream", stream.ID)
-	}
+	})
 	return nil
 }
 
@@ -276,6 +344,15 @@ func (a *Acexy) StopStream(stream *AceStream, out io.Writer) error {
 
 	// Remove the writer from the list of writers
 	ongoingStream.writers.Remove(out)
+
+	// If this writer was already evicted by PMultiWriter timeout, the client
+	// count was already decremented in the OnEvict callback. Skip the
+	// decrement to avoid double-counting.
+	if _, wasEvicted := ongoingStream.evicted[out]; wasEvicted {
+		delete(ongoingStream.evicted, out)
+		slog.Debug("Writer was already evicted, skipping decrement", "stream", stream.ID)
+		return nil
+	}
 
 	// Unregister the client
 	if ongoingStream.clients > 0 {
@@ -342,7 +419,9 @@ func GetStream(a *Acexy, aceId AceID, extraParams url.Values) (*AceStreamMiddlew
 	req.URL.RawQuery = extraParams.Encode()
 
 	slog.Debug("Request URL", "url", req.URL.String())
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: a.NoResponseTimeout,
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		slog.Debug("Error getting stream", "error", err)
@@ -385,7 +464,12 @@ func CloseStream(stream *AceStream) error {
 	q.Add("method", "stop")
 	req.URL.RawQuery = q.Encode()
 
-	client := &http.Client{}
+	client := &http.Client{
+		/* the backend should respond in way less time than this one, but it may hang (AceStream)
+		 * is not very well coded), so we set a timeout to avoid hanging forever
+		 */
+		Timeout: 3 * time.Second,
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		return err
