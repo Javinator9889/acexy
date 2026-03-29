@@ -1,3 +1,35 @@
+
+<div align="right">
+  <details>
+    <summary >🌐 Language</summary>
+    <div>
+      <div align="center">
+        <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=en">English</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=zh-CN">简体中文</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=zh-TW">繁體中文</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=ja">日本語</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=ko">한국어</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=hi">हिन्दी</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=th">ไทย</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=fr">Français</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=de">Deutsch</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=es">Español</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=it">Italiano</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=ru">Русский</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=pt">Português</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=nl">Nederlands</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=pl">Polski</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=ar">العربية</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=fa">فارسی</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=tr">Türkçe</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=vi">Tiếng Việt</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=id">Bahasa Indonesia</a>
+        | <a href="https://openaitx.github.io/view.html?user=Javinator9889&project=acexy&lang=as">অসমীয়া</
+      </div>
+    </div>
+  </details>
+</div>
+
 # `acexy` - An AceStream Proxy Written In Go! ⚡
 
 [![Go Build](https://github.com/Javinator9889/acexy/actions/workflows/build.yaml/badge.svg)](https://github.com/Javinator9889/acexy/actions/workflows/build.yaml)
